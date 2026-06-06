@@ -30,7 +30,7 @@ Five business domains in scope: **Delivery**, **Finance**, **Sales**, **People**
 |---|---|---|
 | Audit | Dataset audit, Metric audit, Query audit | ✅ Complete |
 | Design | Governance design, Semantic layer design | ✅ Complete |
-| Build | Canonical models, Semantic layer (MetricFlow YAML), Domain reference files, Agent config | ✅ Complete |
+| Build | Canonical models, LookML views, Semantic layer (MetricFlow YAML + LookML), Domain reference files, Agent config | ✅ Complete |
 | Validation | Eval suite (55 Q&A pairs), Adversarial config | ✅ Complete |
 | Launch | Launch gate report (all 5 domains cleared), Enablement guide | ✅ Complete |
 
@@ -94,6 +94,25 @@ Five YAML files defining 23 metrics in MetricFlow / dbt Semantic Layer format:
 - [`people_metrics.yml`](.wire/releases/01-ra-agentic-analytics/artifacts/semantic_layer/people_metrics.yml)
 - [`ai_adoption_metrics.yml`](.wire/releases/01-ra-agentic-analytics/artifacts/semantic_layer/ai_adoption_metrics.yml)
 
+### LookML semantic layer
+
+The same 23 metrics are also implemented as LookML measures across the canonical view files, grouped under `"Canonical Metrics"` in the Looker field picker. These are additive — the MetricFlow YAML remains the programmatic query interface; the LookML measures make the same metrics available in Looker explores for dashboard and ad-hoc use.
+
+**Views updated:**
+
+| View file | Canonical measures added |
+|---|---|
+| [`general_ledger_fact.view.lkml`](lookml/views/general_ledger_fact.view.lkml) | `net_revenue_gbp`, `cost_of_sales_gbp`, `monthly_expenses_gbp` |
+| [`invoices_fact.view.lkml`](lookml/views/invoices_fact.view.lkml) | `outstanding_invoices_gbp`, `days_sales_outstanding` |
+| [`timesheets_fact.view.lkml`](lookml/views/timesheets_fact.view.lkml) | `billable_utilisation_pct`, `avg_billing_rate_gbp` |
+| [`deals_fact.view.lkml`](lookml/views/deals_fact.view.lkml) | `pipeline_value_gbp`, `avg_deal_velocity_days` |
+| [`persons_dim.view.lkml`](lookml/views/persons_dim.view.lkml) | `headcount_active` |
+| [`agentic_framework_command_events_fact.view.lkml`](lookml/views/agentic_framework_command_events_fact.view.lkml) | `wire_commands_total`, `wire_commands_successful`, `wire_command_success_rate`, `wire_active_consultants` — **new view, no prior LookML** |
+
+A new `wire_command_events` explore was added to [`analytics.model.lkml`](lookml/models/analytics.model.lkml) for the AI Adoption domain, joining `agentic_framework_command_events_fact` and `persons_dim` on `consultant_fk`.
+
+See [`lookml_views_notes.md`](.wire/releases/01-ra-agentic-analytics/artifacts/lookml_views_notes.md) for full change log, stale-view fixes, and known TODOs (including `mom_revenue_growth_pct` which requires a derived table, and the `contacts_dim` explore migration due before 2026-09-01).
+
 ### Eval suite
 
 55 Q&A pairs across 5 domains, with CI runner and per-domain accuracy thresholds. Each question includes the canonical source, required filters, and the most common failure mode to test against:
@@ -130,6 +149,7 @@ Five YAML files defining 23 metrics in MetricFlow / dbt Semantic Layer format:
         semantic_layer_design.md        # 23 metric specifications
         canonical_models.md             # Record of dbt schema changes made
         canonical_models_lineage.md     # Upstream/downstream lineage per canonical model
+        lookml_views_notes.md           # LookML changes: views created/updated, TODOs
         semantic_layer/                 # MetricFlow YAML files (5 domains)
         knowledge_skill/                # DOMAIN_REFERENCE.md files (5 domains)
         agent_config/
@@ -138,6 +158,17 @@ Five YAML files defining 23 metrics in MetricFlow / dbt Semantic Layer format:
         adversarial_config.md           # Adversarial review setup
         launch_gate.md                  # Per-domain accuracy gate results
         enablement.md                   # User guide and maintenance docs
+lookml/
+  models/
+    analytics.model.lkml                # Main model — explores updated/added
+  views/
+    agentic_framework_command_events_fact.view.lkml  # NEW — Wire adoption telemetry
+    general_ledger_fact.view.lkml       # Updated — canonical Finance view
+    invoices_fact.view.lkml             # Updated — DSO and outstanding invoice measures
+    timesheets_fact.view.lkml           # Updated — canonical Delivery view
+    deals_fact.view.lkml                # Updated — canonical Sales view
+    persons_dim.view.lkml               # Updated — canonical People view
+    [153 further view files]            # Existing RA LookML project — unchanged
 docs/
   sow.md                                # Statement of Work
 ```
