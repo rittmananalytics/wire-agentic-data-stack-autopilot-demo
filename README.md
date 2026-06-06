@@ -131,6 +131,68 @@ See [`lookml_views_notes.md`](.wire/releases/01-ra-agentic-analytics/artifacts/l
 
 ---
 
+## Deploying the deliverables
+
+### 1. Installing the agent skill
+
+The skill file is at `.wire/releases/01-ra-agentic-analytics/artifacts/agent_config/SKILL.md`.
+
+In Claude Code, run `/plugin install` then copy `SKILL.md` into the project's `.claude/skills/` directory, or place it in your global skills directory for use across projects. The skill activates immediately — no infrastructure, no API keys beyond what Claude Code already has.
+
+### 2. Deploying the MetricFlow semantic layer
+
+Copy the five YAML files from `artifacts/semantic_layer/` into the dbt project alongside the relevant mart models. Then:
+
+```bash
+dbt parse                  # validates YAML syntax and model references
+dbt sl list metrics        # should return all 23 metrics
+```
+
+Requires dbt Cloud Semantic Layer or standalone MetricFlow CLI. `mom_revenue_growth_pct` uses a LAG window function in a saved query — this metric requires dbt Cloud; it will not resolve under MetricFlow CLI alone. Target: `ra-development.analytics` via BigQuery adapter.
+
+### 3. Deploying the LookML semantic layer
+
+Push the six changed files in `./lookml/` to the Git repository that Looker's project tracks:
+
+- `models/analytics.model.lkml`
+- `views/general_ledger_fact.view.lkml`
+- `views/invoices_fact.view.lkml`
+- `views/timesheets_fact.view.lkml`
+- `views/deals_fact.view.lkml`
+- `views/persons_dim.view.lkml`
+- `views/agentic_framework_command_events_fact.view.lkml` (new file)
+
+Run the LookML validator in the Looker IDE after deployment. The `agentic_framework_command_events_fact` view references a BigQuery table of the same name — the corresponding dbt model must be deployed before this view will validate. The Canonical Metrics measure group appears in the field picker inside each relevant explore once the LookML is live.
+
+### 4. Syncing domain reference files
+
+The five `DOMAIN_REFERENCE.md` files belong colocated with the dbt mart models they describe — not inside `.wire/`. Copy each from `artifacts/knowledge_skill/` to the appropriate domain subfolder in the dbt project:
+
+| File | Destination |
+|---|---|
+| `DOMAIN_REFERENCE_delivery.md` | dbt `models/marts/delivery/` |
+| `DOMAIN_REFERENCE_finance.md` | dbt `models/marts/finance/` |
+| `DOMAIN_REFERENCE_sales.md` | dbt `models/marts/sales/` |
+| `DOMAIN_REFERENCE_people.md` | dbt `models/marts/people/` |
+| `DOMAIN_REFERENCE_ai_adoption.md` | dbt `models/marts/ai_adoption/` |
+
+Add the CI check from `artifacts/canonical_models.md` to your PR workflow. It flags any PR that modifies a mart model file without a corresponding update to its `DOMAIN_REFERENCE.md` — preventing the knowledge base from drifting out of sync with schema changes.
+
+### 5. Running the eval suite
+
+The five YAML eval files are in `artifacts/eval_suite/`. Each contains Q&A pairs tagged with canonical source, required filters, and the most likely failure mode. Run them against the deployed agent (SKILL.md installed) and compare answers against the `expected_output` fields.
+
+Per-domain pass targets are 85% for all five domains. Add the eval runner to CI so schema changes that break routing or metric definitions surface as test failures before they reach production.
+
+### 6. Post-deployment tasks (time-bound)
+
+| Deadline | Task |
+|---|---|
+| **2026-06-20** | Remove `cycle_times`, `cycle_times_hkm`, `cycle_times_booksy` from the `analytics` dataset. These are 0-row client engagement views exposing client Jira schema in RA's own dataset. Urgent. |
+| **2026-09-01** | Complete deprecation of `journals_fact`, the five bare KPI view pairs, and `contacts_dim`. Migrate the `contacts` Looker explore from `contacts_dim` to `persons_dim`. |
+
+---
+
 ## Repo structure
 
 ```
