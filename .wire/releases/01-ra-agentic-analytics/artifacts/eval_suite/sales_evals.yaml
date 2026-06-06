@@ -1,0 +1,184 @@
+# Sales Domain Evaluation Suite
+# Release: 01-ra-agentic-analytics
+# Accuracy target: 85% (pass threshold: 10/11 or 9/11)
+# Canonical source: deals_fact, contact_sales_meetings_fact, pipeline_stages_dim
+# Last updated: 2026-06-06
+
+metadata:
+  domain: sales
+  version: "1.0"
+  accuracy_target: 0.85
+  question_count: 11
+  canonical_tables:
+    - deals_fact
+    - contact_sales_meetings_fact
+    - pipeline_stages_dim
+
+evaluations:
+
+  - id: sal_001
+    category: pipeline_value
+    question: "What is the current total pipeline value?"
+    expected_answer_pattern: >
+      Should query deals_fact filtered to deal_status = 'open'
+      AND is_latest_snapshot = true.
+      Should sum deal_amount_gbp (not deal_amount).
+      Should return a single GBP figure.
+    required_table: deals_fact
+    required_filter: "is_latest_snapshot AND deal_status"
+    currency_normalised: true
+    notes: >
+      Two common failure modes: (1) not filtering to is_latest_snapshot = true, causing
+      double-counting across snapshot days; (2) summing deal_amount instead of deal_amount_gbp,
+      mixing currencies.
+
+  - id: sal_002
+    category: pipeline_value
+    question: "What is the pipeline value broken down by service line?"
+    expected_answer_pattern: >
+      Should query deals_fact filtered to deal_status = 'open' AND is_latest_snapshot = true.
+      Should group by service_line.
+      Should return deal_amount_gbp sum and deal count per service line.
+    required_table: deals_fact
+    required_filter: "is_latest_snapshot AND deal_status"
+    currency_normalised: true
+    notes: >
+      service_line values: data_engineering, analytics, agentic_ai, training, other.
+      Model should include all service lines, including those with zero open deals.
+
+  - id: sal_003
+    category: pipeline_value
+    question: "Show me the sales funnel — how many deals and what value are at each pipeline stage?"
+    expected_answer_pattern: >
+      Should query deals_fact (open deals, is_latest_snapshot = true),
+      join to pipeline_stages_dim for stage ordering,
+      group by pipeline_stage_label and sort by stage_order ascending.
+      Should return deal count and deal_amount_gbp sum per stage.
+    required_table: deals_fact
+    required_secondary_table: pipeline_stages_dim
+    required_filter: "is_latest_snapshot"
+    currency_normalised: true
+    notes: >
+      Critical: must sort by pipeline_stages_dim.stage_order, not alphabetically.
+      Alphabetical sort would put 'Negotiation' before 'Qualified'.
+
+  - id: sal_004
+    category: deal_count
+    question: "How many deals did we close in May 2026?"
+    expected_answer_pattern: >
+      Should query deals_fact filtered to deal_status = 'closed_won'
+      AND is_latest_snapshot = true
+      AND close_date BETWEEN '2026-05-01' AND '2026-05-31'.
+      Should return count of distinct deal_pk.
+    required_table: deals_fact
+    required_filter: "close_date AND deal_status"
+    currency_normalised: false
+    notes: >
+      Must filter by close_date (not snapshot_date or created_date) to correctly
+      attribute wins to the month they closed.
+
+  - id: sal_005
+    category: deal_count
+    question: "How many deals do we currently have in the Proposal Sent stage?"
+    expected_answer_pattern: >
+      Should query deals_fact filtered to pipeline_stage_label = 'Proposal Sent'
+      AND deal_status = 'open'
+      AND is_latest_snapshot = true.
+      Count of distinct deal_pk.
+    required_table: deals_fact
+    required_filter: "pipeline_stage_label AND is_latest_snapshot"
+    currency_normalised: false
+    notes: >
+      Exact stage label match required. 'Proposal Sent' — check case sensitivity.
+
+  - id: sal_006
+    category: avg_deal_size
+    question: "What is the average deal size for deals we closed this year?"
+    expected_answer_pattern: >
+      Should query deals_fact filtered to deal_status = 'closed_won',
+      is_latest_snapshot = true, and close_date in 2026.
+      Should compute AVG(deal_amount_gbp).
+      Should state that this is GBP-normalised.
+    required_table: deals_fact
+    required_filter: "deal_status AND close_date"
+    currency_normalised: true
+    notes: >
+      Must use deal_amount_gbp. If the model uses deal_amount, it mixes currencies
+      and the average is meaningless. Check for explicit currency normalisation statement.
+
+  - id: sal_007
+    category: avg_deal_size
+    question: "How does average deal size compare between the agentic_ai and analytics service lines for deals closed in the last 12 months?"
+    expected_answer_pattern: >
+      Should query deals_fact filtered to deal_status = 'closed_won',
+      is_latest_snapshot = true, close_date in last 12 months.
+      Should group by service_line, filter to agentic_ai and analytics.
+      Should return AVG(deal_amount_gbp) and deal count for each.
+    required_table: deals_fact
+    required_filter: "deal_status AND close_date AND service_line"
+    currency_normalised: true
+    notes: >
+      Comparison question. Model should present both figures side by side with
+      deal counts so the reader can assess statistical significance.
+
+  - id: sal_008
+    category: deal_velocity
+    question: "What is our average deal velocity — how long does it typically take to close a deal from first touch to close?"
+    expected_answer_pattern: >
+      Should query deals_fact filtered to deal_status = 'closed_won', is_latest_snapshot = true.
+      Should compute AVG(days_to_close) where close_date IS NOT NULL.
+      Should state that deals without close_date are excluded (approx 12-15% of open deals).
+    required_table: deals_fact
+    required_filter: "deal_status AND close_date IS NOT NULL"
+    currency_normalised: false
+    notes: >
+      Must explicitly state that null close_date deals are excluded.
+      days_to_close = close_date - created_date. Verify the model uses this column
+      or correctly computes it, rather than guessing.
+
+  - id: sal_009
+    category: deal_velocity
+    question: "Are deals closing faster or slower than 6 months ago?"
+    expected_answer_pattern: >
+      Should compute average days_to_close for two periods:
+      deals closed in Jan–Mar 2026 vs Apr–Jun 2026 (or similar rolling 6-month comparison).
+      Should compare the averages and state direction of change.
+    required_table: deals_fact
+    required_filter: "deal_status AND close_date"
+    currency_normalised: false
+    notes: >
+      Trend/comparison question. Failure mode: returning a single average instead of
+      two period comparisons.
+
+  - id: sal_010
+    category: meeting_frequency
+    question: "On average, how many sales meetings happen before a deal closes?"
+    expected_answer_pattern: >
+      Should join contact_sales_meetings_fact to deals_fact via deal_fk.
+      Should filter deals to deal_status = 'closed_won', is_latest_snapshot = true.
+      Should compute COUNT(meeting_pk) / COUNT(DISTINCT deal_pk).
+      Should note that deals with zero meetings are included in denominator.
+    required_table: contact_sales_meetings_fact
+    required_secondary_table: deals_fact
+    required_filter: "deal_status"
+    currency_normalised: false
+    notes: >
+      Tests the join between meetings and deals. Must use contact_sales_meetings_fact
+      (not deprecated contact_meetings_fact). Deals with no linked meetings should be
+      included in the denominator with a meeting count of zero.
+
+  - id: sal_011
+    category: meeting_frequency
+    question: "Which deals in the pipeline have had no meetings recorded in the last 30 days?"
+    expected_answer_pattern: >
+      Should identify open deals (deal_status = 'open', is_latest_snapshot = true)
+      where no meeting_pk exists in contact_sales_meetings_fact with
+      meeting_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY).
+      Should return deal_name, deal_amount_gbp, pipeline_stage_label, owner_name.
+    required_table: deals_fact
+    required_secondary_table: contact_sales_meetings_fact
+    required_filter: "deal_status AND is_latest_snapshot AND meeting_date"
+    currency_normalised: true
+    notes: >
+      Anti-join or LEFT JOIN with NULL filter. Tests ability to identify missing activity.
+      Should include deals with no meetings at all (not just no recent meetings).

@@ -1,0 +1,179 @@
+# Finance Domain Evaluation Suite
+# Release: 01-ra-agentic-analytics
+# Accuracy target: 85% (pass threshold: 10/11 or 9/11 depending on question weighting)
+# Canonical source: general_ledger_fact, invoices_fact, chart_of_accounts_dim
+# Last updated: 2026-06-06
+
+metadata:
+  domain: finance
+  version: "1.0"
+  accuracy_target: 0.85
+  question_count: 11
+  canonical_tables:
+    - general_ledger_fact
+    - invoices_fact
+    - chart_of_accounts_dim
+    - monthly_pl_fact
+
+evaluations:
+
+  - id: fin_001
+    category: monthly_pl
+    question: "What was total revenue in May 2026?"
+    expected_answer_pattern: >
+      Should query general_ledger_fact filtered to account_type = 'revenue'
+      and period_date BETWEEN '2026-05-01' AND '2026-05-31'.
+      Answer should be a GBP amount using amount_gbp column.
+      Should NOT query journals_fact (deprecated).
+    required_table: general_ledger_fact
+    required_filter: "period_date"
+    currency_normalised: true
+    notes: >
+      Common failure mode: querying journals_fact instead of general_ledger_fact.
+      Second failure mode: not filtering to account_type = 'revenue', returning total GL activity.
+
+  - id: fin_002
+    category: monthly_pl
+    question: "Show me the P&L for Q1 2026 — revenue, gross margin, and operating expenses."
+    expected_answer_pattern: >
+      Should use monthly_pl_fact (the aggregated P&L mart) for this multi-line request,
+      or aggregate general_ledger_fact by account_type across Jan–Mar 2026.
+      Should produce three figures: revenue, COGS (for gross margin), and opex.
+      Gross margin = (revenue - COGS) / revenue * 100.
+    required_table: general_ledger_fact
+    required_filter: "period_date"
+    currency_normalised: true
+    notes: >
+      Model must correctly identify account_type = 'cogs' for gross margin calculation.
+      Should not conflate 'opex' and 'cogs'.
+
+  - id: fin_003
+    category: outstanding_invoices
+    question: "How many invoices are currently outstanding and what is the total value?"
+    expected_answer_pattern: >
+      Should query invoices_fact filtered to invoice_status = 'outstanding' or 'unpaid'.
+      Should return count of distinct invoice_pk and sum of amount_gbp.
+      Must filter to is_latest_snapshot = true if invoices_fact is a snapshot model.
+    required_table: invoices_fact
+    required_filter: "invoice_status"
+    currency_normalised: true
+    notes: >
+      'Outstanding' means not yet paid — the model must correctly interpret invoice_status.
+      Check whether 'overdue' invoices are a separate status that should also be included.
+
+  - id: fin_004
+    category: outstanding_invoices
+    question: "Which clients have invoices more than 30 days overdue?"
+    expected_answer_pattern: >
+      Should query invoices_fact where invoice_status = 'overdue'
+      AND DATE_DIFF(CURRENT_DATE(), due_date, DAY) > 30.
+      Should return client names and total overdue amounts.
+      Should order by overdue amount descending.
+    required_table: invoices_fact
+    required_filter: "due_date"
+    currency_normalised: true
+    notes: >
+      Model must use due_date, not invoice_date. Common failure: filtering on invoice_date
+      instead of due_date for overdue logic.
+
+  - id: fin_005
+    category: days_sales_outstanding
+    question: "What is our current Days Sales Outstanding (DSO)?"
+    expected_answer_pattern: >
+      DSO = (outstanding_receivables / total_revenue) * days_in_period.
+      Should use invoices_fact for receivables and general_ledger_fact for revenue.
+      Standard formula: (sum of outstanding invoices / sum of revenue for trailing 90 days) * 90.
+      Answer should be in days.
+    required_table: invoices_fact
+    required_secondary_table: general_ledger_fact
+    currency_normalised: true
+    notes: >
+      This is a calculation question. The model needs to construct the ratio correctly.
+      Accept any reasonable DSO period (30, 60, or 90 days) as long as formula is stated.
+
+  - id: fin_006
+    category: days_sales_outstanding
+    question: "How has DSO changed over the last 6 months — is it improving or getting worse?"
+    expected_answer_pattern: >
+      Should compute monthly DSO using invoices_fact and general_ledger_fact
+      across Jan–Jun 2026. Should surface the trend direction (improving = decreasing DSO).
+      Should produce at least 5 monthly data points.
+    required_table: invoices_fact
+    required_filter: "period_date"
+    currency_normalised: true
+    notes: >
+      Trend question. Model must produce a time series, not a single number.
+      Failure mode: returning a single current DSO value without the trend.
+
+  - id: fin_007
+    category: cash_position
+    question: "What is the current cash position in our main GBP account?"
+    expected_answer_pattern: >
+      Should query general_ledger_fact filtered to account_type = 'balance_sheet'
+      and account_code matching cash/bank accounts in chart_of_accounts_dim.
+      Should sum the net balance (credits minus debits) for those accounts.
+      Answer in GBP.
+    required_table: general_ledger_fact
+    required_secondary_table: chart_of_accounts_dim
+    currency_normalised: true
+    notes: >
+      Requires joining general_ledger_fact to chart_of_accounts_dim to identify
+      cash account codes. The model must know to filter by account category, not guess account codes.
+
+  - id: fin_008
+    category: cash_position
+    question: "How much revenue has been invoiced but not yet collected this month?"
+    expected_answer_pattern: >
+      Should compute unbilled or invoiced-but-unpaid revenue for the current month.
+      invoices_fact: filter to invoice_date in current month, invoice_status != 'paid'.
+      Answer in GBP.
+    required_table: invoices_fact
+    required_filter: "invoice_date"
+    currency_normalised: true
+    notes: >
+      Tests understanding of the difference between invoiced revenue and collected cash.
+      Should not conflate with total revenue from general_ledger_fact.
+
+  - id: fin_009
+    category: revenue_vs_budget
+    question: "How is revenue tracking against budget for the current financial year to date?"
+    expected_answer_pattern: >
+      Should compare actual revenue (general_ledger_fact, account_type = 'revenue',
+      YTD period_date) against budget figures.
+      If a budget table exists (e.g. budget_fact or revenue_budget_fact), should join to it.
+      Should report variance in GBP and as a percentage.
+    required_table: general_ledger_fact
+    currency_normalised: true
+    notes: >
+      If no budget table is available in the schema, the model should state this clearly
+      rather than fabricating budget figures. Partial credit for correct actual revenue query
+      with honest statement about budget data availability.
+
+  - id: fin_010
+    category: revenue_vs_budget
+    question: "Which months in the last financial year came in under budget on revenue?"
+    expected_answer_pattern: >
+      Should query general_ledger_fact for revenue by month in the last FY,
+      compare to budget, and identify months where actual < budget.
+      Should return month names, actual revenue, budget, and variance.
+    required_table: general_ledger_fact
+    required_filter: "period_date"
+    currency_normalised: true
+    notes: >
+      Requires budget comparison. Same caveat as fin_009 re: budget table availability.
+
+  - id: fin_011
+    category: monthly_pl
+    question: "What are the top 5 expense categories by spend this quarter?"
+    expected_answer_pattern: >
+      Should query general_ledger_fact filtered to account_type = 'opex'
+      and current quarter period_date range.
+      Should group by account_name or account_category from chart_of_accounts_dim.
+      Should return top 5 by sum(amount_gbp) descending.
+    required_table: general_ledger_fact
+    required_secondary_table: chart_of_accounts_dim
+    required_filter: "period_date"
+    currency_normalised: true
+    notes: >
+      Model must join to chart_of_accounts_dim to get readable category names.
+      Failure mode: returning raw account codes without joining to the dimension table.

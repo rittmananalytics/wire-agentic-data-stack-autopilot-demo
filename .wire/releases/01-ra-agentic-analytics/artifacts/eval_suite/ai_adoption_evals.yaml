@@ -1,0 +1,184 @@
+domain: ai_adoption
+accuracy_target: 85
+description: >
+  Evaluation suite for the AI Adoption domain. Tests the critical disambiguation
+  between Wire Framework (agentic_framework_* tables) and Claude Code / coding agent
+  (coding_agent_* tables), correct adoption score sourcing, mandatory event_type
+  filter on command events, and avoidance of the Tier 3 developer_sessions_fact table.
+
+questions:
+
+  - id: AI_01
+    question: "Who has the highest Wire adoption score this week?"
+    expected_answer: >
+      Query `wire_adoption_weekly_fact` filtered to MAX(week_start_date). Join to
+      `persons_dim` for consultant names. Order by `adoption_score` DESC.
+      Return top 3–5 consultants with their adoption_score and component sub-scores
+      (score_active_days, score_command_volume, score_autopilot).
+      Do NOT re-compute the score from agentic_framework_command_events_fact —
+      the pre-computed score in wire_adoption_weekly_fact applies the correct weighting.
+      Do NOT use developer_users_dim — that is for coding agent users, not Wire users.
+    canonical_source: "wire_adoption_weekly_fact JOIN persons_dim"
+    pass_criteria: >
+      PASS if: (1) uses wire_adoption_weekly_fact, (2) filters to MAX(week_start_date),
+      (3) joins to persons_dim for names, (4) uses adoption_score column directly,
+      (5) does not re-derive score from raw command events.
+      FAIL if: uses developer_users_dim, queries agentic_framework_command_events_fact
+      and attempts to re-derive the score, omits week filter.
+
+  - id: AI_02
+    question: "How many autopilot runs have been executed in total?"
+    expected_answer: >
+      Query `agentic_framework_command_events_fact` with filters:
+      `event_type = 'command_complete'` AND `is_autopilot = true`.
+      Return a count. Optionally provide context: autopilot count vs manual count and
+      the overall autopilot percentage. Note: one /wire:autopilot invocation generates
+      multiple command_complete events (one per artifact step) — this is by design.
+    canonical_source: "agentic_framework_command_events_fact | MetricFlow:autopilot_usage_pct"
+    pass_criteria: >
+      PASS if: (1) filters event_type = 'command_complete', (2) filters is_autopilot = true,
+      (3) provides total count, (4) optionally provides autopilot % alongside count.
+      FAIL if: omits event_type filter (counts starts and failures), uses a non-AI-adoption table.
+
+  - id: AI_03
+    question: "What are the most-used Wire commands?"
+    expected_answer: >
+      Query `agentic_framework_command_events_fact` where `event_type = 'command_complete'`.
+      Group by `command_name`, count runs, include autopilot breakdown per command.
+      Optionally include `artifact_name` as a secondary grouping. Order by count DESC.
+      Return top 10–15 commands. Include avg_duration_seconds for context on which
+      commands take longest.
+    canonical_source: "agentic_framework_command_events_fact"
+    pass_criteria: >
+      PASS if: (1) applies event_type = 'command_complete' filter, (2) groups by command_name,
+      (3) returns ordered results.
+      FAIL if: omits event_type filter, uses coding_agent_prompts_fact for this question.
+
+  - id: AI_04
+    question: "How many Claude Code prompts have we submitted this month?"
+    expected_answer: >
+      Query `coding_agent_prompts_fact` (NOT agentic_framework_command_events_fact).
+      Filter: `prompt_date >= DATE_TRUNC(CURRENT_DATE(), MONTH)`.
+      Return total prompt count, distinct developer count, and average prompts per
+      developer. Do NOT use developer_sessions_fact — that is Tier 3.
+    canonical_source: "coding_agent_prompts_fact | MetricFlow:coding_agent_prompts_per_day"
+    pass_criteria: >
+      PASS if: (1) uses coding_agent_prompts_fact (not agentic_framework tables),
+      (2) applies month date filter, (3) does not use developer_sessions_fact.
+      FAIL if: queries agentic_framework_command_events_fact for this question (conflates
+      Wire commands with Claude Code prompts), uses developer_sessions_fact.
+
+  - id: AI_05
+    question: "Is Wire adoption trending up or down over the last 12 weeks?"
+    expected_answer: >
+      Query `wire_adoption_weekly_fact` for the last 12 `week_start_date` values.
+      Do NOT filter to a single week — this is a trend question. Group by week_start_date,
+      average adoption_score across consultants, sum commands_run and autopilot_runs.
+      Order by week_start_date ascending to show direction. Apply simple interpretation
+      of trend (e.g. compare first 6 weeks average to last 6 weeks average).
+    canonical_source: "wire_adoption_weekly_fact"
+    pass_criteria: >
+      PASS if: (1) queries multiple weeks (not filtered to max week only),
+      (2) covers ~12 weeks of data, (3) provides trend direction interpretation,
+      (4) notes if fewer than 12 weeks of data are available (total rows = 38,
+      so coverage is ~38 consultant-weeks across all time).
+      FAIL if: filters to single week, does not interpret trend direction.
+
+  - id: AI_06
+    question: "How does Wire usage compare across consultants this month?"
+    expected_answer: >
+      Query `agentic_framework_command_events_fact` filtered to current month
+      (event_date >= DATE_TRUNC(CURRENT_DATE(), MONTH)) AND event_type = 'command_complete'.
+      Join to `persons_dim` on consultant_fk → person_id for consultant names.
+      Group by consultant, count commands_run, count autopilot_runs, compute autopilot_pct.
+      Order by commands_run DESC. Supplement with `wire_adoption_weekly_fact` for adoption
+      scores for weeks within the current month if available.
+    canonical_source: "agentic_framework_command_events_fact JOIN persons_dim | wire_adoption_weekly_fact"
+    pass_criteria: >
+      PASS if: (1) uses agentic_framework not coding_agent tables, (2) joins to persons_dim
+      for names, (3) applies event_type filter, (4) includes both command volume and
+      autopilot breakdown.
+      FAIL if: uses developer_users_dim (those are coding agent users, not Wire users),
+      uses developer_sessions_fact.
+
+  - id: AI_07
+    question: "Which Wire artifacts are worked on most frequently?"
+    expected_answer: >
+      Query `agentic_framework_command_events_fact` where event_type = 'command_complete'.
+      Group by `artifact_name`. Count runs. Order DESC.
+      Artifact examples: requirements, dbt, pipeline_design, semantic_layer, deployment, etc.
+      Optional: break down by command action (generate / validate / review) using
+      command_name parsing.
+    canonical_source: "agentic_framework_command_events_fact"
+    pass_criteria: >
+      PASS if: (1) groups by artifact_name, (2) applies event_type filter,
+      (3) returns ordered count by artifact.
+      FAIL if: omits event_type filter, confuses artifact_name with command_name.
+
+  - id: AI_08
+    question: "How many developers are actively using Claude Code?"
+    expected_answer: >
+      Query `coding_agent_sessions_fact` for distinct `developer_user_fk` values
+      where `session_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)`.
+      Join to `developer_users_dim` and then to `persons_dim` for names.
+      Note: developer_users_dim has only 6 rows — this is the upper bound of
+      tracked developers. Also note that non-telemetry-enrolled Claude Code users
+      are not captured. Do NOT use developer_sessions_fact (Tier 3).
+    canonical_source: "coding_agent_sessions_fact JOIN developer_users_dim JOIN persons_dim"
+    pass_criteria: >
+      PASS if: (1) uses coding_agent_sessions_fact (not developer_sessions_fact),
+      (2) notes that only 6 developers are tracked, (3) applies recent activity filter,
+      (4) joins to developer_users_dim and persons_dim for context.
+      FAIL if: uses developer_sessions_fact (Tier 3), uses agentic_framework tables for
+      this coding-agent question.
+
+  - id: AI_09
+    question: "What is the breakdown of Claude Code prompts by category this month?"
+    expected_answer: >
+      Query `coding_agent_prompts_fact` WHERE prompt_date >= DATE_TRUNC(CURRENT_DATE(), MONTH).
+      Group by `prompt_category`. Count prompts per category. Compute % of total.
+      Include a caveat: prompt_category is machine-classified with ~85% accuracy —
+      treat breakdowns as directional, not precise. Categories include:
+      code_generation, debugging, explanation, refactoring (and potentially others).
+    canonical_source: "coding_agent_prompts_fact"
+    pass_criteria: >
+      PASS if: (1) uses coding_agent_prompts_fact, (2) groups by prompt_category,
+      (3) includes the accuracy caveat for machine classification.
+      FAIL if: uses agentic_framework tables, omits category accuracy caveat.
+
+  - id: AI_10
+    question: "Who logged Wire commands yesterday?"
+    expected_answer: >
+      Query `agentic_framework_command_events_fact` where
+      `event_date = DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)`
+      AND `event_type = 'command_complete'`.
+      Join to `persons_dim` on consultant_fk. Return distinct consultants with
+      their command names and counts. Note: wire_adoption_weekly_fact is updated
+      weekly (Mondays) so won't include yesterday's data — must use the events table.
+    canonical_source: "agentic_framework_command_events_fact JOIN persons_dim"
+    pass_criteria: >
+      PASS if: (1) uses agentic_framework_command_events_fact (not wire_adoption_weekly_fact
+      which has a weekly lag), (2) filters to yesterday's date, (3) applies event_type filter,
+      (4) joins to persons_dim for names.
+      FAIL if: uses wire_adoption_weekly_fact for a yesterday query (would miss recent data).
+
+  - id: AI_11
+    question: "How does Wire Framework usage compare to Claude Code usage across the team?"
+    expected_answer: >
+      This is a multi-surface question requiring data from both tracking systems.
+      Wire component: COUNT commands from agentic_framework_command_events_fact
+      (event_type = 'command_complete') for the period, with distinct consultant count.
+      Claude Code component: COUNT prompts from coding_agent_prompts_fact for the period,
+      with distinct developer count.
+      Key caveat to surface: the two user populations may not be identical.
+      Wire tracks all consultants (full team coverage). Coding agent tracks only 6 developers
+      with telemetry integration. Direct comparison at the individual level requires joining
+      both datasets to persons_dim and noting that some individuals will appear in one
+      dataset but not the other.
+    canonical_source: "agentic_framework_command_events_fact | coding_agent_prompts_fact | persons_dim"
+    pass_criteria: >
+      PASS if: (1) queries BOTH datasets separately (not conflated), (2) notes the different
+      user population sizes (all consultants vs 6 developers), (3) joins to persons_dim
+      for the common key, (4) does not use developer_sessions_fact.
+      FAIL if: conflates Wire commands with Claude Code prompts into a single query,
+      uses developer_sessions_fact, uses any Tier 3 table.

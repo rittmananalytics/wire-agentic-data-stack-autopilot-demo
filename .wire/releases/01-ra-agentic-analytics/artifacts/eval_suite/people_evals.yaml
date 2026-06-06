@@ -1,0 +1,168 @@
+# People Domain Evaluation Suite
+# Release: 01-ra-agentic-analytics
+# Accuracy target: 85% (pass threshold: 9/10)
+# Canonical source: persons_dim, contact_utilization_fact, timesheets_forecast_fact,
+#                   staff_daily_engagement_fact, hr_survey_results_fact
+# Last updated: 2026-06-06
+
+metadata:
+  domain: people
+  version: "1.0"
+  accuracy_target: 0.85
+  question_count: 10
+  canonical_tables:
+    - persons_dim
+    - contact_utilization_fact
+    - timesheets_forecast_fact
+    - staff_daily_engagement_fact
+    - hr_survey_results_fact
+
+evaluations:
+
+  - id: peo_001
+    category: headcount
+    question: "How many people are currently employed at Rittman Analytics?"
+    expected_answer_pattern: >
+      Should query persons_dim filtered to employment_status = 'active'.
+      Should return COUNT(DISTINCT person_pk).
+      Must NOT query contacts_dim (deprecated — mixes staff with CRM contacts).
+    required_table: persons_dim
+    required_filter: "employment_status = 'active'"
+    deprecated_table_check: contacts_dim
+    notes: >
+      The primary test of the contacts_dim → persons_dim migration.
+      Any answer sourced from contacts_dim fails automatically.
+
+  - id: peo_002
+    category: headcount
+    question: "How many staff do we have in each department?"
+    expected_answer_pattern: >
+      Should query persons_dim filtered to employment_status = 'active'.
+      Should group by department.
+      Departments: delivery, sales, operations, leadership.
+    required_table: persons_dim
+    required_filter: "employment_status = 'active'"
+    deprecated_table_check: contacts_dim
+    notes: >
+      Simple group-by. Main risk is incorrect source table.
+
+  - id: peo_003
+    category: utilisation
+    question: "What is the average billable utilisation across the delivery team this month?"
+    expected_answer_pattern: >
+      Should query contact_utilization_fact joined to persons_dim.
+      Filter: is_billable_role = true, employment_status = 'active',
+      week_start_date in current month.
+      Compute AVG(utilisation_pct).
+      Should note target is 75%.
+    required_table: contact_utilization_fact
+    required_secondary_table: persons_dim
+    required_filter: "week_start_date AND is_billable_role"
+    notes: >
+      Must filter to billable roles only. Including non-billable staff
+      deflates the utilisation average. Target context (75%) expected.
+
+  - id: peo_004
+    category: utilisation
+    question: "Which consultants are currently below 60% utilisation?"
+    expected_answer_pattern: >
+      Should query contact_utilization_fact joined to persons_dim.
+      Filter: is_billable_role = true, employment_status = 'active',
+      week_start_date in last 2–4 weeks.
+      Filter results to utilisation_pct < 60.
+      Return person_name, avg utilisation, job_role.
+    required_table: contact_utilization_fact
+    required_secondary_table: persons_dim
+    required_filter: "utilisation_pct < 60 AND is_billable_role"
+    notes: >
+      Action-oriented query. Model should return names, not just an aggregate.
+      Period window should be recent (last 2–4 weeks), not all-time.
+
+  - id: peo_005
+    category: utilisation
+    question: "How does actual utilisation compare to forecast for the last 4 weeks?"
+    expected_answer_pattern: >
+      Should join contact_utilization_fact (actual) and timesheets_forecast_fact (forecast)
+      on consultant_fk and week_start_date.
+      Must filter timesheets_forecast_fact to consultant_fk IS NOT NULL.
+      Should return both averages and the variance.
+    required_table: contact_utilization_fact
+    required_secondary_table: timesheets_forecast_fact
+    required_filter: "consultant_fk IS NOT NULL"
+    notes: >
+      Forecast vs. actual comparison. Model must handle the null consultant_fk
+      in forecast table — placeholder rows must be excluded.
+
+  - id: peo_006
+    category: utilisation
+    question: "Who is forecast to be available (under 50% utilisation) next week?"
+    expected_answer_pattern: >
+      Should query timesheets_forecast_fact for next week's Monday date.
+      Join to persons_dim where is_billable_role = true, employment_status = 'active'.
+      Filter to forecast_utilisation_pct < 50 AND consultant_fk IS NOT NULL.
+      Return person_name, job_role, forecast_utilisation_pct.
+    required_table: timesheets_forecast_fact
+    required_secondary_table: persons_dim
+    required_filter: "forecast_week_start AND consultant_fk IS NOT NULL"
+    notes: >
+      Forward-looking query. Must correctly compute next week's Monday date.
+      Must exclude placeholders (null consultant_fk).
+
+  - id: peo_007
+    category: engagement
+    question: "What is the average staff engagement score this week?"
+    expected_answer_pattern: >
+      Should query staff_daily_engagement_fact for current week's dates.
+      Compute AVG(activity_score_pct).
+      Should note what the score measures (AI tool engagement composite).
+    required_table: staff_daily_engagement_fact
+    required_filter: "activity_date (current week)"
+    notes: >
+      Model should qualify the score — it is an AI-activity composite, not a
+      general productivity measure. Failure to note this is a partial pass.
+
+  - id: peo_008
+    category: engagement
+    question: "Which team members have had no AI tool activity recorded in the last 7 days?"
+    expected_answer_pattern: >
+      Should find persons_dim (employment_status = 'active') with no matching rows
+      in staff_daily_engagement_fact in the last 7 days.
+      Anti-join or LEFT JOIN with NULL filter on consultant_fk.
+      Return person_name, department.
+    required_table: persons_dim
+    required_secondary_table: staff_daily_engagement_fact
+    required_filter: "activity_date (last 7 days)"
+    notes: >
+      Anti-join pattern. Tests understanding that absence of rows = no activity.
+      Model should note this could include consultants on leave.
+
+  - id: peo_009
+    category: availability
+    question: "What is the team's total available capacity in hours for the next 2 weeks based on current forecasts?"
+    expected_answer_pattern: >
+      Should query timesheets_forecast_fact for the next 2 Monday-aligned weeks.
+      Filter: consultant_fk IS NOT NULL.
+      Available hours = (1 - forecast_utilisation_pct / 100) * 40h per consultant per week.
+      Sum across all active billable staff.
+    required_table: timesheets_forecast_fact
+    required_secondary_table: persons_dim
+    required_filter: "forecast_week_start (next 2 weeks) AND consultant_fk IS NOT NULL"
+    notes: >
+      Capacity calculation. Must use forecast data, not historical actuals.
+      Should express as available hours (not utilised hours).
+
+  - id: peo_010
+    category: engagement
+    question: "What is the current employee NPS score?"
+    expected_answer_pattern: >
+      Should query hr_survey_results_fact where survey_type = 'enps'.
+      Should use the most recent survey date.
+      Should compute eNPS = (promoters/total * 100) - (detractors/total * 100)
+      where promoters = score >= 9, detractors = score <= 6.
+      Should state the survey date and total respondent count.
+    required_table: hr_survey_results_fact
+    required_filter: "survey_type = 'enps'"
+    notes: >
+      Model must use the correct eNPS formula. Passives (7–8) are excluded from
+      numerator calculations but included in total_respondents.
+      Must state the survey date — eNPS is point-in-time, not a rolling average.

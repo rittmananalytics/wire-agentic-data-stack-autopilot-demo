@@ -1,0 +1,185 @@
+domain: delivery
+accuracy_target: 85
+description: >
+  Evaluation suite for the Delivery domain. Tests routing correctness, mandatory
+  filter application, table selection (Tier 1 vs Tier 2), and correct handling
+  of common Delivery question patterns. Expected answers describe the correct
+  methodology and source — not point-in-time numeric values.
+
+questions:
+
+  - id: DEL_01
+    question: "What is our billable utilisation this month?"
+    expected_answer: >
+      The agent should use MetricFlow metric `billable_utilisation_pct` or query
+      `timesheets_fact` with `is_billable = true` filter. Time period should default
+      to the current calendar month (DATE_TRUNC(CURRENT_DATE(), MONTH) to CURRENT_DATE()).
+      Result should be expressed as a percentage with the time period stated explicitly.
+      The provenance footer must show `is_billable = true` was applied.
+    canonical_source: "timesheets_fact | MetricFlow:billable_utilisation_pct"
+    pass_criteria: >
+      PASS if: (1) uses timesheets_fact or MetricFlow billable_utilisation_pct,
+      (2) applies is_billable = true filter, (3) states the time period,
+      (4) does not use contacts_dim or any Tier 3 table.
+      FAIL if: omits is_billable filter, uses journals_fact, uses contacts_dim.
+
+  - id: DEL_02
+    question: "Which consultants are below 70% utilisation this week?"
+    expected_answer: >
+      The agent should query `timesheets_fact` joined to `persons_dim` (NOT contacts_dim).
+      Filter: `is_billable = true` for numerator, `employment_status = 'active' AND
+      person_type = 'employee'` on persons_dim. Time window: current ISO week
+      (DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY)) to CURRENT_DATE()). Results grouped
+      by consultant with utilisation_pct computed. HAVING utilisation_pct < 0.70.
+      Result should include consultant name and utilisation percentage.
+    canonical_source: "timesheets_fact JOIN persons_dim"
+    pass_criteria: >
+      PASS if: (1) joins to persons_dim (not contacts_dim), (2) applies is_billable filter,
+      (3) filters to current week, (4) applies HAVING utilisation_pct < 0.70,
+      (5) includes consultant names in result.
+      FAIL if: uses contacts_dim, omits is_billable filter, uses a Tier 3 table.
+
+  - id: DEL_03
+    question: "How many hours have been logged against the Booksy engagement this month?"
+    expected_answer: >
+      Query `timesheets_fact` joined to `timesheet_projects_dim` using `timesheet_project_fk`.
+      Filter: `project_name LIKE '%Booksy%'` (or exact match if known) AND
+      `timesheet_billing_date >= DATE_TRUNC(CURRENT_DATE(), MONTH)`.
+      Return total hours and split between billable and non-billable.
+      Note: agent should NOT query `cycle_times_booksy` — that table is Tier 3 and
+      contains a completely different data type (sprint cycle times, not timesheets).
+    canonical_source: "timesheets_fact JOIN timesheet_projects_dim"
+    pass_criteria: >
+      PASS if: (1) queries timesheets_fact not cycle_times_booksy, (2) joins to
+      timesheet_projects_dim for project filter, (3) applies month filter.
+      FAIL if: attempts to query cycle_times_booksy or any cycle_times_* table.
+
+  - id: DEL_04
+    question: "What is the RAG status of our current engagements?"
+    expected_answer: >
+      Query `timesheet_project_engagement_rag_status_fact` filtered to the most
+      recent `rag_week_start_date` (using a subquery: SELECT MAX(rag_week_start_date)).
+      Join to `timesheet_projects_dim` for project_name and client_name.
+      Return all engagements with their overall_rag_status and rag_summary.
+      Order RED first, then AMBER, then GREEN.
+      Do NOT query the deprecated `engagement_rag_status` view.
+    canonical_source: "timesheet_project_engagement_rag_status_fact | MetricFlow:engagement_rag_pct_green"
+    pass_criteria: >
+      PASS if: (1) filters to MAX(rag_week_start_date), (2) does not use deprecated
+      `engagement_rag_status` view, (3) includes rag_summary in output.
+      FAIL if: omits week filter (returning all historical weeks), uses deprecated view.
+
+  - id: DEL_05
+    question: "What was our sprint velocity last sprint compared to the sprint before?"
+    expected_answer: >
+      Query `delivery_sprint_issue_history_fact` with `is_last_day_of_sprint = true`
+      AND `issue_status = 'Done'`. Sum `story_points_completed` grouped by `sprint_name`.
+      Return the two most recent completed sprints ordered by sprint end date descending.
+      Calculate the delta between them. MetricFlow `sprint_velocity` metric can also be used.
+    canonical_source: "delivery_sprint_issue_history_fact | MetricFlow:sprint_velocity"
+    pass_criteria: >
+      PASS if: (1) applies is_last_day_of_sprint = true filter, (2) filters to
+      issue_status = 'Done', (3) returns at least two sprints for comparison.
+      FAIL if: omits is_last_day_of_sprint filter (would double-count completed points).
+
+  - id: DEL_06
+    question: "Which engagements have logged more hours than their budgeted hours?"
+    expected_answer: >
+      Join `timesheets_fact` to `timesheet_projects_dim` on `timesheet_project_fk`.
+      Group by project, sum `timesheet_hours_billed`. Compare to `timesheet_projects_dim.budgeted_hours`.
+      Filter to projects where `budgeted_hours IS NOT NULL` (only fixed-price engagements have budgets).
+      HAVING SUM(hours) > budgeted_hours. Note: MetricFlow cannot answer this question
+      directly — requires Tier 2 table access.
+    canonical_source: "timesheets_fact JOIN timesheet_projects_dim"
+    pass_criteria: >
+      PASS if: (1) joins timesheets to timesheet_projects_dim, (2) compares to budgeted_hours,
+      (3) notes that only fixed-price projects have budget data, (4) does not use a Tier 3 table.
+      FAIL if: uses contacts_dim, omits the budgeted_hours comparison.
+
+  - id: DEL_07
+    question: "What is our average billing rate by consultant this quarter?"
+    expected_answer: >
+      Query `timesheets_fact` filtered to `is_billable = true AND
+      timesheet_billable_hourly_rate_amount > 0` and current quarter date range.
+      Join to `persons_dim` (not contacts_dim) for consultant names.
+      Compute weighted average: SUM(hours * rate) / SUM(hours) grouped by consultant.
+      MetricFlow `avg_billing_rate_gbp` metric available but may not support consultant grain —
+      fall through to Tier 2 if needed.
+    canonical_source: "timesheets_fact JOIN persons_dim | MetricFlow:avg_billing_rate_gbp"
+    pass_criteria: >
+      PASS if: (1) uses persons_dim not contacts_dim, (2) applies is_billable = true,
+      (3) uses weighted average formula (not simple AVG of rate column),
+      (4) filters to positive rate values.
+      FAIL if: uses contacts_dim, uses simple AVG instead of weighted average.
+
+  - id: DEL_08
+    question: "How much revenue have we recognised so far this year?"
+    expected_answer: >
+      Use `recognized_revenue_fact` (NOT general_ledger_fact) — the question says
+      "recognised" which means milestone-based recognition.
+      Sum `recognised_amount_gbp` where `recognition_date >= DATE_TRUNC(CURRENT_DATE(), YEAR)`.
+      Include a note that this differs from cash/accrual revenue from the general ledger,
+      and that the two sources will not agree.
+    canonical_source: "recognized_revenue_fact | MetricFlow:revenue_recognised_gbp"
+    pass_criteria: >
+      PASS if: (1) uses recognized_revenue_fact not general_ledger_fact,
+      (2) filters to current year, (3) notes the distinction from ledger revenue.
+      FAIL if: uses general_ledger_fact for a "recognised revenue" question without flagging
+      the difference, uses journals_fact.
+
+  - id: DEL_09
+    question: "Show me a breakdown of hours by client for the last 90 days"
+    expected_answer: >
+      Join `timesheets_fact` to `timesheet_projects_dim` on timesheet_project_fk.
+      Group by `timesheet_projects_dim.client_name`. Sum `timesheet_hours_billed`.
+      Filter: `timesheet_billing_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)`.
+      Include both billable and non-billable total, with a billable split column.
+      Do NOT attempt to join via contacts_dim — client name comes from timesheet_projects_dim.
+    canonical_source: "timesheets_fact JOIN timesheet_projects_dim"
+    pass_criteria: >
+      PASS if: (1) gets client_name from timesheet_projects_dim (not contacts_dim),
+      (2) applies 90-day date filter, (3) includes billable/non-billable split.
+      FAIL if: routes client lookup through contacts_dim or persons_dim.
+
+  - id: DEL_10
+    question: "What is the trend in our engagement RAG status over the last 8 weeks?"
+    expected_answer: >
+      Query `timesheet_project_engagement_rag_status_fact` for the last 8 distinct
+      `rag_week_start_date` values (do NOT filter to latest week only — this is a trend question).
+      For each week, count GREEN / AMBER / RED and compute the % green.
+      Join to `timesheet_projects_dim` if client-level breakdown is needed.
+      Order by rag_week_start_date ascending to show trend direction.
+    canonical_source: "timesheet_project_engagement_rag_status_fact"
+    pass_criteria: >
+      PASS if: (1) does NOT filter to max week only (correctly includes multiple weeks),
+      (2) groups by rag_week_start_date, (3) computes RAG counts or percentages per week,
+      (4) returns 8 weeks of data or states how many weeks are available.
+      FAIL if: applies a single-week filter to a trend question.
+
+  - id: DEL_11
+    question: "Which consultant has logged the most non-billable time this month?"
+    expected_answer: >
+      Query `timesheets_fact` where `is_billable = false` AND
+      `timesheet_billing_date >= DATE_TRUNC(CURRENT_DATE(), MONTH)`.
+      Join to `persons_dim` (not contacts_dim). Group by consultant, sum hours.
+      Order descending by non-billable hours. Include a breakdown by project_type
+      (holiday, internal, overhead, sales) from `timesheet_projects_dim`.
+    canonical_source: "timesheets_fact JOIN persons_dim JOIN timesheet_projects_dim"
+    pass_criteria: >
+      PASS if: (1) filters is_billable = false, (2) uses persons_dim not contacts_dim,
+      (3) includes month filter, (4) provides project_type context if possible.
+      FAIL if: uses contacts_dim, omits is_billable = false filter.
+
+  - id: DEL_12
+    question: "What percentage of our engagements are currently green RAG status?"
+    expected_answer: >
+      Use MetricFlow `engagement_rag_pct_green` metric. Or query
+      `timesheet_project_engagement_rag_status_fact` filtered to MAX(rag_week_start_date),
+      counting COUNTIF(overall_rag_status = 'GREEN') / COUNT(*).
+      Result should be a percentage for the most recent weekly assessment.
+      The provenance footer should note the assessment week date.
+    canonical_source: "timesheet_project_engagement_rag_status_fact | MetricFlow:engagement_rag_pct_green"
+    pass_criteria: >
+      PASS if: (1) filters to most recent week, (2) computes % green correctly,
+      (3) states the assessment week in the response, (4) does not use deprecated view.
+      FAIL if: returns all historical weeks (inflates denominator), uses deprecated view.

@@ -1,0 +1,276 @@
+semantic_models:
+  - name: timesheets
+    description: >
+      One row per timesheet entry. Grain: individual time log by a consultant against
+      a project on a given date. Source: ra-development.analytics.timesheets_fact.
+      Use is_billable = true to restrict to billable entries for utilisation calculations.
+    model: ref('timesheets_fact')
+    defaults:
+      agg_time_dimension: timesheet_billing_date
+
+    entities:
+      - name: timesheet_entry
+        type: primary
+        expr: CONCAT(CAST(contact_fk AS STRING), '_', CAST(timesheet_billing_date AS STRING), '_', CAST(timesheet_project_fk AS STRING))
+      - name: consultant
+        type: foreign
+        expr: contact_fk
+      - name: project
+        type: foreign
+        expr: timesheet_project_fk
+
+    dimensions:
+      - name: timesheet_billing_date
+        type: time
+        type_params:
+          time_granularity: day
+      - name: is_billable
+        type: categorical
+        expr: CAST(is_billable AS STRING)
+      - name: timesheet_project_fk
+        type: categorical
+      - name: contact_fk
+        type: categorical
+
+    measures:
+      - name: billable_hours_sum
+        description: Sum of hours logged on billable timesheet entries
+        agg: sum
+        expr: CASE WHEN is_billable = true THEN timesheet_hours_billed ELSE 0 END
+      - name: non_billable_hours_sum
+        description: Sum of hours logged on non-billable timesheet entries
+        agg: sum
+        expr: CASE WHEN is_billable = false THEN timesheet_hours_billed ELSE 0 END
+      - name: total_hours_sum
+        description: Sum of all hours logged, billable and non-billable
+        agg: sum
+        expr: COALESCE(timesheet_hours_billed, 0)
+      - name: billable_rate_weighted_sum
+        description: Sum of (hours * rate) for weighted average rate calculation
+        agg: sum
+        expr: CASE WHEN is_billable = true AND timesheet_billable_hourly_rate_amount > 0
+                   THEN timesheet_hours_billed * timesheet_billable_hourly_rate_amount
+                   ELSE 0 END
+      - name: billable_entries_count
+        description: Count of billable timesheet entries with a valid hourly rate
+        agg: count
+        expr: CASE WHEN is_billable = true AND timesheet_billable_hourly_rate_amount > 0
+                   THEN timesheet_project_fk END
+
+  - name: sprint_issues
+    description: >
+      Daily snapshot of sprint issues. Grain: one row per issue per sprint per day.
+      Source: ra-development.analytics.delivery_sprint_issue_history_fact.
+      Filter to the last day of each sprint to get completed story points without double-counting.
+    model: ref('delivery_sprint_issue_history_fact')
+    defaults:
+      agg_time_dimension: snapshot_date
+
+    entities:
+      - name: sprint_issue_snapshot
+        type: primary
+        expr: CONCAT(CAST(issue_id AS STRING), '_', CAST(sprint_id AS STRING), '_', CAST(snapshot_date AS STRING))
+      - name: sprint
+        type: foreign
+        expr: sprint_id
+
+    dimensions:
+      - name: snapshot_date
+        type: time
+        type_params:
+          time_granularity: day
+      - name: sprint_name
+        type: categorical
+      - name: issue_status
+        type: categorical
+      - name: team_name
+        type: categorical
+      - name: is_last_day_of_sprint
+        type: categorical
+        expr: CAST(is_last_day_of_sprint AS STRING)
+
+    measures:
+      - name: story_points_completed_sum
+        description: Story points for issues in Done status on the last day of the sprint
+        agg: sum
+        expr: CASE WHEN issue_status = 'Done' AND is_last_day_of_sprint = true
+                   THEN story_points_completed ELSE 0 END
+
+  - name: engagement_rag_status
+    description: >
+      Weekly LLM-generated RAG status per engagement. Grain: one row per engagement per week.
+      Source: ra-development.analytics.timesheet_project_engagement_rag_status_fact.
+      Always filter to the most recent week unless building a trend view.
+    model: ref('timesheet_project_engagement_rag_status_fact')
+    defaults:
+      agg_time_dimension: rag_week_start_date
+
+    entities:
+      - name: engagement_rag_entry
+        type: primary
+        expr: CONCAT(CAST(engagement_id AS STRING), '_', CAST(rag_week_start_date AS STRING))
+      - name: project
+        type: foreign
+        expr: engagement_id
+
+    dimensions:
+      - name: rag_week_start_date
+        type: time
+        type_params:
+          time_granularity: week
+      - name: overall_rag_status
+        type: categorical
+      - name: delivery_lead_fk
+        type: categorical
+
+    measures:
+      - name: engagement_count
+        description: Count of distinct engagements assessed in the period
+        agg: count_distinct
+        expr: engagement_id
+      - name: green_engagement_count
+        description: Count of engagements with green RAG status
+        agg: count_distinct
+        expr: CASE WHEN overall_rag_status = 'GREEN' THEN engagement_id END
+
+  - name: recognised_revenue
+    description: >
+      Revenue recognition schedule. Grain: one row per revenue recognition entry.
+      Source: ra-development.analytics.recognized_revenue_fact.
+      Use for recognised revenue metrics (milestone-based). For cash basis use general_ledger_fact.
+    model: ref('recognized_revenue_fact')
+    defaults:
+      agg_time_dimension: recognition_date
+
+    entities:
+      - name: revenue_entry
+        type: primary
+        expr: revenue_entry_id
+      - name: project
+        type: foreign
+        expr: project_fk
+      - name: consultant
+        type: foreign
+        expr: consultant_fk
+
+    dimensions:
+      - name: recognition_date
+        type: time
+        type_params:
+          time_granularity: day
+      - name: revenue_type
+        type: categorical
+
+    measures:
+      - name: recognised_revenue_gbp_sum
+        description: Sum of recognised revenue in GBP
+        agg: sum
+        expr: recognised_amount_gbp
+
+
+metrics:
+  - name: billable_hours
+    description: >
+      Total hours logged against billable engagements. Decimal hours (1.5 = 90 minutes).
+      Filter: is_billable = true. Base table: timesheets_fact.
+    label: Billable Hours
+    type: simple
+    type_params:
+      measure: timesheets.billable_hours_sum
+
+  - name: non_billable_hours
+    description: >
+      Hours logged against internal, overhead, or non-billable project codes.
+      Includes holiday, sick, internal development, and sales time.
+    label: Non-Billable Hours
+    type: simple
+    type_params:
+      measure: timesheets.non_billable_hours_sum
+
+  - name: billable_utilisation_pct
+    description: >
+      Billable hours as a percentage of total hours logged. Note: this is an approximation
+      of true utilisation (billable / capacity). For capacity-denominator utilisation,
+      capacity_hours must be sourced from a separate FTE × working-days calculation.
+      This metric uses logged hours as the denominator — it will read high on weeks where
+      consultants log fewer hours than their contracted capacity.
+    label: Billable Utilisation %
+    type: ratio
+    type_params:
+      numerator: billable_hours
+      denominator:
+        name: total_hours
+        description: All hours logged (billable + non-billable)
+        type: simple
+        type_params:
+          measure: timesheets.total_hours_sum
+
+  - name: billable_vs_internal_split_pct
+    description: Billable hours as a fraction of all hours logged. Equivalent to billable_utilisation_pct when using logged-hours denominator.
+    label: Billable vs Internal Split %
+    type: ratio
+    type_params:
+      numerator: billable_hours
+      denominator:
+        name: total_hours_for_split
+        description: All hours logged
+        type: simple
+        type_params:
+          measure: timesheets.total_hours_sum
+
+  - name: avg_billing_rate_gbp
+    description: >
+      Weighted average hourly billing rate across all billable timesheet entries.
+      Calculation: SUM(hours × rate) / SUM(billable_hours). In GBP.
+      Filter: is_billable = true AND rate > 0.
+    label: Avg Billing Rate (GBP/hr)
+    type: ratio
+    type_params:
+      numerator:
+        name: billing_rate_weighted_numerator
+        description: Sum of billable hours multiplied by hourly rate
+        type: simple
+        type_params:
+          measure: timesheets.billable_rate_weighted_sum
+      denominator: billable_hours
+
+  - name: sprint_velocity
+    description: >
+      Story points completed per sprint. Measured from delivery_sprint_issue_history_fact,
+      filtered to issues in Done status on the last day of each sprint.
+      Group by sprint_name for per-sprint values; use week/month grain for trend.
+    label: Sprint Velocity (Story Points)
+    type: simple
+    type_params:
+      measure: sprint_issues.story_points_completed_sum
+
+  - name: engagement_rag_pct_green
+    description: >
+      Percentage of active engagements assessed as green RAG status.
+      Source: timesheet_project_engagement_rag_status_fact.
+      Defaults to most recent week — use time dimension to build trend.
+    label: Engagement RAG % Green
+    type: ratio
+    type_params:
+      numerator:
+        name: green_engagements
+        description: Count of engagements with green RAG status
+        type: simple
+        type_params:
+          measure: engagement_rag_status.green_engagement_count
+      denominator:
+        name: total_assessed_engagements
+        description: Total engagements assessed in the period
+        type: simple
+        type_params:
+          measure: engagement_rag_status.engagement_count
+
+  - name: revenue_recognised_gbp
+    description: >
+      Recognised revenue from the milestone-based revenue recognition schedule.
+      Use for delivery productivity and per-consultant revenue metrics.
+      For cash basis revenue use net_revenue_gbp (finance_metrics.yml).
+    label: Revenue Recognised (GBP)
+    type: simple
+    type_params:
+      measure: recognised_revenue.recognised_revenue_gbp_sum

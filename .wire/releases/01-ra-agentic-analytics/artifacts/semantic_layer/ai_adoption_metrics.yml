@@ -1,0 +1,235 @@
+version: 2
+
+semantic_models:
+  - name: wire_command_events
+    description: >
+      One row per Wire Framework command invocation from agentic_framework_command_events_fact.
+      Grain: one event per CLI command execution, keyed on event_ts + command_name + consultant_fk.
+      exit_status values: success, error, cancelled.
+      command_name follows the pattern '<artifact>-<action>' e.g. 'requirements-generate',
+      'semantic_layer-validate', 'dbt-review'. The 'autopilot' command is recorded as
+      command_name = 'autopilot'.
+    model: ref('agentic_framework_command_events_fact')
+    defaults:
+      agg_time_dimension: event_ts
+
+    entities:
+      - name: command_event
+        type: primary
+        expr: event_pk
+      - name: person
+        type: foreign
+        expr: consultant_fk
+      - name: project
+        type: foreign
+        expr: project_fk
+
+    dimensions:
+      - name: event_ts
+        type: time
+        type_params:
+          time_granularity: day
+        expr: event_ts
+      - name: command_name
+        type: categorical
+        expr: command_name
+      - name: artifact_type
+        type: categorical
+        description: >
+          High-level artifact category derived from command_name prefix.
+          Values: requirements, design, development, testing, deployment, enablement, utility.
+        expr: artifact_type
+      - name: exit_status
+        type: categorical
+        expr: exit_status
+      - name: release_label
+        type: categorical
+        expr: release_label
+      - name: project_id
+        type: categorical
+        expr: project_id
+
+    measures:
+      - name: command_event_count
+        description: Count of all command invocations.
+        agg: count
+        expr: event_pk
+      - name: successful_command_count
+        description: Count of commands that completed with exit_status = 'success'.
+        agg: count
+        expr: case when exit_status = 'success' then event_pk end
+      - name: distinct_consultant_count
+        description: Count of distinct consultants who ran at least one command.
+        agg: count_distinct
+        expr: consultant_fk
+
+  - name: wire_adoption_weekly
+    description: >
+      Weekly adoption rollup per consultant from wire_adoption_weekly_fact.
+      adoption_score is a 0–100 composite: command volume (50%),
+      command diversity across artifact types (30%), and success rate (20%).
+      week_start_date is Monday of the ISO week.
+    model: ref('wire_adoption_weekly_fact')
+    defaults:
+      agg_time_dimension: week_start_date
+
+    entities:
+      - name: adoption_record
+        type: primary
+        expr: adoption_pk
+      - name: person
+        type: foreign
+        expr: consultant_fk
+
+    dimensions:
+      - name: week_start_date
+        type: time
+        type_params:
+          time_granularity: week
+        expr: week_start_date
+
+    measures:
+      - name: adoption_score_sum
+        description: Sum of adoption_score across records. Used to compute weekly averages.
+        agg: sum
+        expr: adoption_score
+      - name: adoption_record_count
+        description: Count of adoption records (one per consultant per week with activity).
+        agg: count
+        expr: adoption_pk
+      - name: active_consultants_count
+        description: Count of distinct consultants with commands_this_week > 0.
+        agg: count_distinct
+        expr: case when commands_this_week > 0 then consultant_fk end
+
+  - name: wire_sessions
+    description: >
+      One row per Claude Code session from agentic_framework_sessions_fact.
+      A session begins when Claude Code starts and ends on process exit or timeout.
+      did_run_autopilot = true when the '/wire:autopilot' command was invoked
+      at least once during the session. session_duration_minutes is derived
+      from session_start_ts and session_end_ts; null where session was not
+      cleanly terminated.
+    model: ref('agentic_framework_sessions_fact')
+    defaults:
+      agg_time_dimension: session_start_ts
+
+    entities:
+      - name: session
+        type: primary
+        expr: session_pk
+      - name: person
+        type: foreign
+        expr: consultant_fk
+
+    dimensions:
+      - name: session_start_ts
+        type: time
+        type_params:
+          time_granularity: day
+        expr: session_start_ts
+      - name: did_run_autopilot
+        type: categorical
+        expr: cast(did_run_autopilot as string)
+
+    measures:
+      - name: session_count
+        description: Count of all Claude Code sessions.
+        agg: count
+        expr: session_pk
+      - name: autopilot_session_count
+        description: Count of sessions where did_run_autopilot = true.
+        agg: count
+        expr: case when did_run_autopilot = true then session_pk end
+
+  - name: coding_agent_sessions
+    description: >
+      One row per coding agent session from coding_agent_sessions_fact.
+      Covers Claude-assisted coding activity outside of Wire commands —
+      inline code generation, file edits, test writing.
+      Distinct from wire_sessions which covers Wire Framework command invocations.
+    model: ref('coding_agent_sessions_fact')
+    defaults:
+      agg_time_dimension: session_date
+
+    entities:
+      - name: coding_session
+        type: primary
+        expr: coding_session_pk
+      - name: person
+        type: foreign
+        expr: consultant_fk
+
+    dimensions:
+      - name: session_date
+        type: time
+        type_params:
+          time_granularity: day
+        expr: session_date
+
+    measures:
+      - name: coding_session_count
+        description: Count of coding agent sessions.
+        agg: count
+        expr: coding_session_pk
+
+metrics:
+  - name: wire_commands_total
+    label: Wire Commands (Total)
+    description: >
+      Count of all Wire Framework command invocations from
+      agentic_framework_command_events_fact. Includes all exit statuses.
+      For success-only counts use the exit_status filter.
+      Use daily or weekly grain — hourly is too granular for most reports.
+    type: simple
+    type_params:
+      measure: command_event_count
+
+  - name: avg_wire_adoption_score
+    label: Avg Wire Adoption Score
+    description: >
+      Average weekly adoption_score across consultants from wire_adoption_weekly_fact.
+      Score is 0–100 composite: command volume 50%, artifact type diversity 30%,
+      success rate 20%. Consultants with zero activity in a week are excluded
+      from the denominator (they produce no row). Score above 60 indicates
+      regular, varied Wire usage. Score above 80 indicates expert-level adoption.
+    type: ratio
+    type_params:
+      numerator: adoption_score_sum
+      denominator: adoption_record_count
+
+  - name: autopilot_run_count
+    label: Autopilot Runs
+    description: >
+      Count of Claude Code sessions where did_run_autopilot = true.
+      Each session counts once regardless of how many autopilot commands
+      were run within it. For command-level autopilot counts, use
+      wire_commands_total filtered to command_name = 'autopilot'.
+    type: simple
+    type_params:
+      measure: autopilot_session_count
+    filter: |
+      {{ Dimension('wire_sessions__did_run_autopilot') }} = 'true'
+
+  - name: coding_agent_sessions_total
+    label: Coding Agent Sessions (Total)
+    description: >
+      Count of Claude-assisted coding sessions from coding_agent_sessions_fact.
+      Distinct from Wire command invocations — this captures inline AI-assisted
+      development work. Combine with wire_commands_total for a full picture
+      of AI tool usage across the team.
+    type: simple
+    type_params:
+      measure: coding_session_count
+
+  - name: wire_active_users_weekly
+    label: Wire Active Users (Weekly)
+    description: >
+      Count of distinct consultants who ran at least one Wire command during
+      the week, from wire_adoption_weekly_fact. A consultant is active if
+      commands_this_week > 0. Use ISO week grain (week_start_date = Monday).
+      Denominator for adoption rate calculations is headcount_active from
+      people_metrics.yml.
+    type: simple
+    type_params:
+      measure: active_consultants_count

@@ -1,0 +1,272 @@
+version: 2
+
+semantic_models:
+  - name: persons
+    description: >
+      One row per person (SCD Type 1) from persons_dim. This is the canonical
+      staff master table. Do not use contacts_dim — it mixes internal staff
+      with external CRM contacts and is deprecated (sunset 2026-09-01).
+      employment_status values: active, on_leave, terminated.
+    model: ref('persons_dim')
+
+    entities:
+      - name: person
+        type: primary
+        expr: person_pk
+
+    dimensions:
+      - name: employment_status
+        type: categorical
+        expr: employment_status
+      - name: job_role
+        type: categorical
+        expr: job_role
+      - name: department
+        type: categorical
+        expr: department
+      - name: location
+        type: categorical
+        expr: location
+      - name: start_date
+        type: time
+        type_params:
+          time_granularity: day
+        expr: start_date
+      - name: person_name
+        type: categorical
+        expr: person_name
+
+    measures:
+      - name: person_count
+        description: Count of distinct persons.
+        agg: count_distinct
+        expr: person_pk
+      - name: active_person_count
+        description: Count of persons with employment_status = 'active'.
+        agg: count_distinct
+        expr: case when employment_status = 'active' then person_pk end
+
+  - name: contact_utilization
+    description: >
+      Weekly actual billable utilisation per consultant from contact_utilization_fact.
+      Built from timesheets_fact rollup. One row per consultant per week.
+      utilisation_pct = billable_hours / available_hours * 100.
+      Target utilisation is 75% for billable staff; non-billable roles excluded.
+    model: ref('contact_utilization_fact')
+    defaults:
+      agg_time_dimension: week_start_date
+
+    entities:
+      - name: utilization_record
+        type: primary
+        expr: utilization_pk
+      - name: person
+        type: foreign
+        expr: consultant_fk
+
+    dimensions:
+      - name: week_start_date
+        type: time
+        type_params:
+          time_granularity: week
+        expr: week_start_date
+      - name: is_billable_role
+        type: categorical
+        expr: is_billable_role
+
+    measures:
+      - name: utilisation_pct_sum
+        description: Used internally to compute avg_billable_utilisation_pct.
+        agg: sum
+        expr: utilisation_pct
+      - name: utilisation_record_count
+        description: Count of records, used as denominator for averages.
+        agg: count
+        expr: utilization_pk
+
+  - name: staff_engagement
+    description: >
+      Daily multi-signal engagement scores per consultant from staff_daily_engagement_fact.
+      activity_score_pct is a composite of: Claude Code session frequency (40% weight),
+      Wire command volume (30% weight), Slack message activity (20% weight),
+      and calendar meeting attendance (10% weight). Scores range 0–100.
+    model: ref('staff_daily_engagement_fact')
+    defaults:
+      agg_time_dimension: activity_date
+
+    entities:
+      - name: engagement_record
+        type: primary
+        expr: engagement_pk
+      - name: person
+        type: foreign
+        expr: consultant_fk
+
+    dimensions:
+      - name: activity_date
+        type: time
+        type_params:
+          time_granularity: day
+        expr: activity_date
+
+    measures:
+      - name: activity_score_sum
+        description: Sum of activity_score_pct. Used to compute averages.
+        agg: sum
+        expr: activity_score_pct
+      - name: engagement_record_count
+        description: Count of engagement records. Used as denominator.
+        agg: count
+        expr: engagement_pk
+
+  - name: timesheets_forecast
+    description: >
+      Weekly forecasted utilisation per consultant from timesheets_forecast_fact.
+      Sourced from Harvest Forecast. One row per consultant per week.
+      Some rows have null consultant_fk where placeholder resources are used —
+      these are excluded from person-level metrics by filtering to consultant_fk IS NOT NULL.
+    model: ref('timesheets_forecast_fact')
+    defaults:
+      agg_time_dimension: forecast_week_start
+
+    entities:
+      - name: forecast_record
+        type: primary
+        expr: forecast_pk
+      - name: person
+        type: foreign
+        expr: consultant_fk
+
+    dimensions:
+      - name: forecast_week_start
+        type: time
+        type_params:
+          time_granularity: week
+        expr: forecast_week_start
+      - name: project_fk
+        type: categorical
+        expr: project_fk
+
+    measures:
+      - name: forecast_utilisation_pct_sum
+        description: Sum of forecast_utilisation_pct across records.
+        agg: sum
+        expr: forecast_utilisation_pct
+      - name: forecast_record_count
+        description: Count of forecast records with a named consultant.
+        agg: count
+        expr: case when consultant_fk is not null then forecast_pk end
+
+  - name: hr_survey_results
+    description: >
+      Employee NPS (eNPS) survey results from hr_survey_results_fact.
+      survey_type = 'enps'. respondent_score is 0–10 (standard NPS scale).
+      eNPS = (% Promoters [9–10]) - (% Detractors [0–6]).
+      Passives (7–8) are excluded from the eNPS calculation.
+      Survey cadence is quarterly; filter by survey_date for period comparisons.
+    model: ref('hr_survey_results_fact')
+    defaults:
+      agg_time_dimension: survey_date
+
+    entities:
+      - name: survey_response
+        type: primary
+        expr: response_pk
+      - name: person
+        type: foreign
+        expr: respondent_fk
+
+    dimensions:
+      - name: survey_date
+        type: time
+        type_params:
+          time_granularity: day
+        expr: survey_date
+      - name: survey_type
+        type: categorical
+        expr: survey_type
+
+    measures:
+      - name: promoter_count
+        description: Count of responses with respondent_score >= 9 (NPS promoters).
+        agg: count
+        expr: case when respondent_score >= 9 then response_pk end
+      - name: detractor_count
+        description: Count of responses with respondent_score <= 6 (NPS detractors).
+        agg: count
+        expr: case when respondent_score <= 6 then response_pk end
+      - name: total_respondents
+        description: Count of all responses for the selected period.
+        agg: count
+        expr: response_pk
+
+metrics:
+  - name: headcount_active
+    label: Active Headcount
+    description: >
+      Count of persons with employment_status = 'active' in persons_dim.
+      This is a point-in-time count — do not aggregate over time without
+      filtering to a specific date. For trend analysis, use a time series
+      query with a weekly or monthly grain.
+    type: simple
+    type_params:
+      measure: active_person_count
+
+  - name: avg_billable_utilisation_pct
+    label: Avg Billable Utilisation (%)
+    description: >
+      Average weekly billable utilisation across active, billable-role staff.
+      Source: contact_utilization_fact (actual logged hours from Harvest).
+      Target is 75%. Consultant rows with is_billable_role = false are excluded.
+      Compare to forecast_utilisation_pct for variance analysis.
+    type: ratio
+    type_params:
+      numerator: utilisation_pct_sum
+      denominator: utilisation_record_count
+    filter: |
+      {{ Dimension('contact_utilization__is_billable_role') }} = true
+
+  - name: staff_engagement_score
+    label: Staff Engagement Score
+    description: >
+      Average daily activity_score_pct across all active staff.
+      Composite of Claude Code sessions (40%), Wire commands (30%),
+      Slack activity (20%), meeting attendance (10%). Scores are 0–100.
+      Weekly or monthly grain recommended; daily is noisy.
+    type: ratio
+    type_params:
+      numerator: activity_score_sum
+      denominator: engagement_record_count
+
+  - name: forecast_utilisation_pct
+    label: Forecast Utilisation (%)
+    description: >
+      Average forecasted utilisation from Harvest Forecast for the selected period.
+      Excludes placeholder resource rows (null consultant_fk).
+      Compare to avg_billable_utilisation_pct to surface forecast vs. actual variance.
+    type: ratio
+    type_params:
+      numerator: forecast_utilisation_pct_sum
+      denominator: forecast_record_count
+    filter: |
+      {{ Dimension('timesheets_forecast__consultant_fk') }} IS NOT NULL
+
+  - name: eNPS
+    label: Employee NPS (eNPS)
+    description: >
+      Employee Net Promoter Score. eNPS = (promoters / total_respondents * 100)
+      - (detractors / total_respondents * 100). Scores range -100 to +100.
+      Passives (scores 7–8) are included in total_respondents but excluded from
+      promoter and detractor counts. Filter to survey_type = 'enps'.
+      Survey data is quarterly — point this metric at a quarterly time grain.
+    type: derived
+    type_params:
+      expr: >
+        ({{ metric('promoter_rate_pct') }} - {{ metric('detractor_rate_pct') }})
+      metrics:
+        - name: promoter_rate_pct
+          alias: promoter_rate_pct
+        - name: detractor_rate_pct
+          alias: detractor_rate_pct
+    filter: |
+      {{ Dimension('hr_survey_results__survey_type') }} = 'enps'

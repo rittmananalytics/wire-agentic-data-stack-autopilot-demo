@@ -1,0 +1,205 @@
+semantic_models:
+  - name: general_ledger
+    description: >
+      Canonical general ledger. Grain: one row per journal entry.
+      Source: ra-development.analytics.general_ledger_fact.
+      DO NOT use journals_fact — it is a staging artifact without currency normalisation
+      or intercompany elimination. All amounts are in GBP (already converted).
+      Use net_amount, not gross_amount (gross includes VAT on some entry types).
+    model: ref('general_ledger_fact')
+    defaults:
+      agg_time_dimension: journal_date
+
+    entities:
+      - name: journal_entry
+        type: primary
+        expr: journal_entry_id
+      - name: gl_account
+        type: foreign
+        expr: account_code
+
+    dimensions:
+      - name: journal_date
+        type: time
+        type_params:
+          time_granularity: day
+      - name: account_code
+        type: categorical
+      - name: account_type
+        type: categorical
+      - name: account_report_category
+        type: categorical
+        description: >
+          Canonical categorisation for P&L and balance sheet.
+          Values: REVENUE, COST_OF_SALES, OVERHEADS, ASSETS, LIABILITIES, EQUITY.
+          Use this — do not derive categories from account_code ranges.
+      - name: journal_type
+        type: categorical
+        description: >
+          Entry type. Cash-basis reporting: filter journal_type IN ('CASH_RECEIPT','CASH_PAYMENT').
+          Accrual (default): include all types.
+      - name: currency_code
+        type: categorical
+        description: Original transaction currency. net_amount is already converted to GBP.
+
+    measures:
+      - name: revenue_net_amount_sum
+        description: Sum of net_amount for REVENUE category entries
+        agg: sum
+        expr: CASE WHEN account_report_category = 'REVENUE' THEN net_amount ELSE 0 END
+      - name: cost_of_sales_sum
+        description: Sum of net_amount for COST_OF_SALES category entries
+        agg: sum
+        expr: CASE WHEN account_report_category = 'COST_OF_SALES' THEN net_amount ELSE 0 END
+      - name: overheads_sum
+        description: Sum of net_amount for OVERHEADS category entries
+        agg: sum
+        expr: CASE WHEN account_report_category = 'OVERHEADS' THEN net_amount ELSE 0 END
+      - name: total_expenses_sum
+        description: Sum of COST_OF_SALES + OVERHEADS entries
+        agg: sum
+        expr: CASE WHEN account_report_category IN ('COST_OF_SALES','OVERHEADS') THEN net_amount ELSE 0 END
+
+  - name: invoices
+    description: >
+      Invoice register. Grain: one row per invoice (current state — not history).
+      Source: ra-development.analytics.invoices_fact.
+      For outstanding invoices: filter invoice_status != 'PAID'.
+      For overdue: additionally filter invoice_due_date < CURRENT_DATE().
+    model: ref('invoices_fact')
+    defaults:
+      agg_time_dimension: invoice_date
+
+    entities:
+      - name: invoice
+        type: primary
+        expr: invoice_id
+      - name: client_contact
+        type: foreign
+        expr: person_fk
+
+    dimensions:
+      - name: invoice_date
+        type: time
+        type_params:
+          time_granularity: day
+      - name: invoice_due_date
+        type: time
+        type_params:
+          time_granularity: day
+      - name: invoice_status
+        type: categorical
+        description: Values include PAID, UNPAID, OVERDUE, VOIDED, DRAFT
+      - name: client_name
+        type: categorical
+      - name: days_to_pay
+        type: categorical
+        description: >
+          Pre-computed days from invoice_date to payment_date for paid invoices.
+          NULL for unpaid invoices. Use CURRENT_DATE() - invoice_date for open invoice age.
+
+    measures:
+      - name: outstanding_invoice_amount_sum
+        description: Sum of invoice amounts for unpaid invoices
+        agg: sum
+        expr: CASE WHEN invoice_status != 'PAID' THEN invoice_amount_gbp ELSE 0 END
+      - name: paid_invoice_days_to_pay_sum
+        description: Sum of days_to_pay for paid invoices (for DSO calculation)
+        agg: sum
+        expr: CASE WHEN invoice_status = 'PAID' AND days_to_pay IS NOT NULL
+                   THEN days_to_pay ELSE 0 END
+      - name: paid_invoice_count
+        description: Count of paid invoices (denominator for DSO calculation)
+        agg: count
+        expr: CASE WHEN invoice_status = 'PAID' AND days_to_pay IS NOT NULL
+                   THEN invoice_id END
+      - name: total_invoice_amount_sum
+        description: Sum of all invoice amounts regardless of status
+        agg: sum
+        expr: invoice_amount_gbp
+
+
+metrics:
+  - name: net_revenue_gbp
+    description: >
+      Net revenue from the general ledger. Accrual basis (includes all journal_types).
+      For cash-basis revenue, filter journal_type IN ('CASH_RECEIPT','CASH_PAYMENT') using
+      a where clause on the semantic model or a separate metric definition.
+      Source: general_ledger_fact WHERE account_report_category = 'REVENUE'.
+      All amounts in GBP.
+    label: Net Revenue (GBP)
+    type: simple
+    type_params:
+      measure: general_ledger.revenue_net_amount_sum
+
+  - name: gross_profit_gbp
+    description: >
+      Net revenue minus cost of sales. Does not include overheads.
+      For net profit, subtract overheads separately using monthly_expenses_gbp.
+      Source: general_ledger_fact.
+    label: Gross Profit (GBP)
+    type: derived
+    type_params:
+      expr: net_revenue_gbp - cost_of_sales_gbp
+      metrics:
+        - name: net_revenue_gbp
+        - name: cost_of_sales_gbp
+          description: Cost of sales from general ledger
+          type: simple
+          type_params:
+            measure: general_ledger.cost_of_sales_sum
+
+  - name: outstanding_invoices_gbp
+    description: >
+      Total value of all unpaid invoices. Includes invoices in UNPAID, OVERDUE, and DRAFT
+      status (excludes PAID and VOIDED).
+      For aged debt analysis, apply days_overdue dimension bands in your query.
+    label: Outstanding Invoices (GBP)
+    type: simple
+    type_params:
+      measure: invoices.outstanding_invoice_amount_sum
+
+  - name: days_sales_outstanding
+    description: >
+      Average days from invoice date to payment for paid invoices.
+      Calculation: SUM(days_to_pay) / COUNT(paid invoices).
+      Source: invoices_fact WHERE invoice_status = 'PAID' AND days_to_pay IS NOT NULL.
+      For a blended DSO that includes open invoices, add a separate calculation for
+      CURRENT_DATE() - invoice_date for unpaid invoices.
+    label: Days Sales Outstanding
+    type: ratio
+    type_params:
+      numerator:
+        name: total_days_to_pay
+        description: Sum of days_to_pay across all paid invoices
+        type: simple
+        type_params:
+          measure: invoices.paid_invoice_days_to_pay_sum
+      denominator:
+        name: paid_invoice_count
+        description: Count of paid invoices used in DSO denominator
+        type: simple
+        type_params:
+          measure: invoices.paid_invoice_count
+
+  - name: monthly_expenses_gbp
+    description: >
+      Total operating expenses in the period (COST_OF_SALES + OVERHEADS).
+      Does not include capital expenditure (balance sheet items).
+      Source: general_ledger_fact WHERE account_report_category IN ('COST_OF_SALES','OVERHEADS').
+    label: Monthly Expenses (GBP)
+    type: simple
+    type_params:
+      measure: general_ledger.total_expenses_sum
+
+  - name: mom_revenue_growth_pct
+    description: >
+      Month-on-month percentage change in net revenue.
+      Requires at least 2 months of data. Use monthly time grain.
+      Formula: (current_month_revenue - prior_month_revenue) / ABS(prior_month_revenue).
+    label: MoM Revenue Growth %
+    type: derived
+    type_params:
+      expr: "SAFE_DIVIDE(net_revenue_gbp - LAG(net_revenue_gbp) OVER (ORDER BY metric_time__month), ABS(LAG(net_revenue_gbp) OVER (ORDER BY metric_time__month)))"
+      metrics:
+        - name: net_revenue_gbp

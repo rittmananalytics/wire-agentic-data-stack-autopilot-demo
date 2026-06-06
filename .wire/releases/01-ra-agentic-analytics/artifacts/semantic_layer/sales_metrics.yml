@@ -1,0 +1,185 @@
+version: 2
+
+semantic_models:
+  - name: deals
+    description: >
+      One row per deal snapshot per day from deals_fact.
+      Use deal_amount_gbp for all monetary reporting — deal_amount preserves
+      the original currency. Pipeline stage ordering follows pipeline_stage_order,
+      not alphabetical sort of pipeline_stage_label.
+    model: ref('deals_fact')
+    defaults:
+      agg_time_dimension: snapshot_date
+
+    entities:
+      - name: deal
+        type: primary
+        expr: deal_pk
+      - name: owner
+        type: foreign
+        expr: owner_fk
+      - name: client
+        type: foreign
+        expr: client_fk
+
+    dimensions:
+      - name: snapshot_date
+        type: time
+        type_params:
+          time_granularity: day
+        expr: snapshot_date
+      - name: close_date
+        type: time
+        type_params:
+          time_granularity: day
+        expr: close_date
+      - name: created_date
+        type: time
+        type_params:
+          time_granularity: day
+        expr: created_date
+      - name: pipeline_stage_label
+        type: categorical
+        description: >
+          Human-readable stage name. Use pipeline_stage_order for correct
+          funnel sequencing — do not sort this dimension alphabetically.
+        expr: pipeline_stage_label
+      - name: deal_status
+        type: categorical
+        description: >
+          Values: open, closed_won, closed_lost. Filter to is_latest_snapshot=true
+          before aggregating to avoid double-counting across snapshot days.
+        expr: deal_status
+      - name: deal_currency
+        type: categorical
+        expr: deal_currency
+      - name: owner_name
+        type: categorical
+        expr: owner_name
+      - name: service_line
+        type: categorical
+        expr: service_line
+
+    measures:
+      - name: deal_amount_gbp_sum
+        description: Sum of deal_amount_gbp for selected deals.
+        agg: sum
+        expr: deal_amount_gbp
+      - name: deal_count
+        description: Count of distinct deals.
+        agg: count_distinct
+        expr: deal_pk
+      - name: days_to_close_sum
+        description: Used internally to compute avg_deal_velocity_days.
+        agg: sum
+        expr: days_to_close
+      - name: closed_won_deal_count
+        description: Count of closed_won deals. Apply filter deal_status='closed_won'.
+        agg: count_distinct
+        expr: case when deal_status = 'closed_won' then deal_pk end
+
+  - name: contact_sales_meetings
+    description: >
+      One row per meeting per contact from contact_sales_meetings_fact.
+      Join to deals via deal_fk to link meeting activity to pipeline.
+      Replaces deprecated contact_meetings_fact.
+    model: ref('contact_sales_meetings_fact')
+    defaults:
+      agg_time_dimension: meeting_date
+
+    entities:
+      - name: meeting
+        type: primary
+        expr: meeting_pk
+      - name: deal
+        type: foreign
+        expr: deal_fk
+      - name: contact
+        type: foreign
+        expr: contact_fk
+
+    dimensions:
+      - name: meeting_date
+        type: time
+        type_params:
+          time_granularity: day
+        expr: meeting_date
+      - name: meeting_type
+        type: categorical
+        expr: meeting_type
+
+    measures:
+      - name: meeting_count
+        description: Count of distinct meetings.
+        agg: count_distinct
+        expr: meeting_pk
+
+metrics:
+  - name: pipeline_value_gbp
+    label: Pipeline Value (GBP)
+    description: >
+      Sum of deal_amount_gbp across all open deals as of the latest snapshot.
+      Excludes closed_won and closed_lost. Always filter to is_latest_snapshot=true
+      when querying point-in-time pipeline value.
+    type: simple
+    type_params:
+      measure: deal_amount_gbp_sum
+    filter: |
+      {{ Dimension('deal__deal_status') }} = 'open'
+      AND {{ Dimension('deal__is_latest_snapshot') }} = true
+
+  - name: deals_closed_won
+    label: Deals Closed Won
+    description: >
+      Count of distinct deals reaching closed_won status within the selected
+      time period, based on close_date. Use close_date as the time dimension,
+      not snapshot_date, to correctly attribute wins to their close period.
+    type: simple
+    type_params:
+      measure: closed_won_deal_count
+    filter: |
+      {{ Dimension('deal__deal_status') }} = 'closed_won'
+
+  - name: avg_deal_size_gbp
+    label: Average Deal Size (GBP)
+    description: >
+      Average deal_amount_gbp for closed_won deals. Excludes open and
+      closed_lost deals. Multi-currency deals are normalised to GBP using
+      the exchange rate at close_date — use this metric rather than deal_amount
+      for consistent cross-currency comparisons.
+    type: ratio
+    type_params:
+      numerator: deal_amount_gbp_sum
+      denominator: closed_won_deal_count
+    filter: |
+      {{ Dimension('deal__deal_status') }} = 'closed_won'
+
+  - name: deal_velocity_days
+    label: Deal Velocity (Days)
+    description: >
+      Average number of days from deal created_date to close_date for
+      closed_won deals. Deals without a close_date are excluded.
+      A lower number indicates faster pipeline progression.
+    type: ratio
+    type_params:
+      numerator: days_to_close_sum
+      denominator: closed_won_deal_count
+    filter: |
+      {{ Dimension('deal__deal_status') }} = 'closed_won'
+      AND {{ Dimension('deal__close_date') }} IS NOT NULL
+
+  - name: meetings_per_deal
+    label: Meetings per Deal
+    description: >
+      Average number of sales meetings logged per closed_won deal,
+      joining contact_sales_meetings_fact to deals_fact via deal_fk.
+      Reflects meeting frequency as a leading indicator of deal engagement.
+      Deals with zero meetings are included in the denominator.
+    type: ratio
+    type_params:
+      numerator:
+        name: meeting_count
+        filter: "{{ Dimension('meeting__meeting_type') }} IN ('discovery', 'demo', 'proposal', 'negotiation', 'check_in')"
+      denominator:
+        name: closed_won_deal_count
+        filter: "{{ Dimension('deal__deal_status') }} = 'closed_won'"
