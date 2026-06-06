@@ -1,3 +1,8 @@
+# Canonical sales pipeline fact — Wire agentic_data_stack 2026-06-06
+# Grain: one row per deal snapshot per day (SCD snapshot).
+# deal_amount_gbp is the mandated reporting column for cross-currency comparisons.
+# Canonical source for: pipeline_value_gbp, avg_deal_velocity_days, stage_conversion_rate.
+
 view: deals_fact {
   sql_table_name: `{{ _user_attributes['dataset'] }}.deals_fact`;;
   view_label: "Sales Pipeline"
@@ -737,8 +742,6 @@ dimension: deal_is_deleted {
     sql: ${TABLE}.forecast_probability ;;
   }
 
-
-
   dimension: predicted_amount {
     group_label: "   {{ _view._name| replace: '_', ' ' | replace: 'dim', '' | capitalize}} Forecast"
     hidden: yes
@@ -746,7 +749,35 @@ dimension: deal_is_deleted {
     sql: ${TABLE}.predicted_amount ;;
   }
 
+  # deal_amount_gbp added 2026-06-06 — canonical reporting column for cross-currency comparisons
+  dimension: deal_amount_gbp {
+    group_label: "            {{ _view._name| replace: '_', ' ' | replace: 'fact', '' | capitalize}}  Details"
+    label: "Deal Amount (GBP)"
+    type: number
+    sql: ${TABLE}.deal_amount_gbp ;;
+    description: "Deal amount in GBP after currency conversion. Use this for all cross-currency pipeline reporting."
+    value_format_name: gbp_0
+  }
 
+  # ── Canonical semantic layer measures — Wire agentic_data_stack 2026-06-06 ────────────
 
+  measure: pipeline_value_gbp {
+    group_label: "Canonical Metrics"
+    label: "Pipeline Value (GBP)"
+    type: sum
+    sql: CASE WHEN ${TABLE}.pipeline_stage_id NOT IN ('closedlost','closedwon') THEN ${TABLE}.deal_amount_gbp ELSE 0 END ;;
+    value_format_name: gbp_0
+    description: "Total GBP value of open pipeline deals (excludes closed won/lost). Canonical metric: pipeline_value_gbp."
+  }
+
+  measure: avg_deal_velocity_days {
+    group_label: "Canonical Metrics"
+    label: "Avg Deal Velocity (Days)"
+    type: average
+    sql: ${TABLE}.days_to_close ;;
+    filters: [pipeline_stage_label: "Closed Won"]
+    value_format_name: decimal_1
+    description: "Average days from deal created to closed won. Closed Won deals only."
+  }
 
 }

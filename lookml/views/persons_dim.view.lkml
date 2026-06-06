@@ -1,6 +1,7 @@
-# Unified Person Dimension
-# A single dimension table that tracks every role a person plays across the business
-# Replaces fragmented person tables (contacts, staff, candidates, etc.) with a unified approach
+# Canonical person dimension — Wire agentic_data_stack 2026-06-06
+# Replaces contacts_dim (deprecated 2026-09-01). Use persons_dim for internal staff.
+# contacts_dim mixes staff and external contacts — do not use for headcount or utilisation.
+# Grain: one row per person (SCD Type 1 — latest state only).
 
 view: persons_dim {
   sql_table_name: `ra-development.analytics.persons_dim` ;;
@@ -866,4 +867,24 @@ view: persons_dim__all_addresses {
     type: string
     sql: ${TABLE}.postcode_zip ;;
   }
+
+  # employment_status added 2026-06-06 — accepted_values: active, on_leave, terminated
+  dimension: employment_status {
+    group_label: "      Person Identity"
+    label: "Employment Status"
+    type: string
+    sql: ${TABLE}.employment_status ;;
+    description: "Current employment status: active, on_leave, or terminated."
+  }
+
+  # ── Canonical semantic layer measures — Wire agentic_data_stack 2026-06-06 ────────────
+
+  measure: headcount_active {
+    group_label: "Canonical Metrics"
+    label: "Active Headcount"
+    type: count_distinct
+    sql: CASE WHEN ${TABLE}.employment_status = 'active' THEN ${TABLE}.person_pk END ;;
+    description: "Count of persons with employment_status = 'active'. Canonical source for headcount metrics."
+  }
+
 }

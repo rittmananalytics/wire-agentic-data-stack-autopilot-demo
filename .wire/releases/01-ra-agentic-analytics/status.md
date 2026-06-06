@@ -8,10 +8,10 @@ target_launch_date: 2026-07-18
 
 # Warehouse configuration
 warehouse: bigquery
-bi_tool: other
-semantic_layer: none
+bi_tool: looker
+semantic_layer: dbt_semantic_layer+lookml
 dbt_project_path: ./
-lookml_project_path: ~
+lookml_project_path: ./lookml
 
 # Domain configuration (populated during dataset_audit)
 domains:
@@ -122,9 +122,16 @@ canonical_models:
 ### LookML Views
 ```yaml
 lookml_views:
-  generate: skipped
-  validate: skipped
-  review: skipped
+  generate: complete
+  validate: complete
+  review: approved
+  views_created: 1
+  views_updated: 5
+  explores_updated: 1
+  lookml_project_path: ./lookml
+  generated_date: 2026-06-06
+  reviewer: Mark Rittman
+  review_date: 2026-06-06
 ```
 
 ### Semantic Layer
@@ -139,6 +146,19 @@ semantic_layer:
   generated_date: 2026-06-06
   reviewer: Mark Rittman
   review_date: 2026-06-06
+
+semantic_layer_lookml:
+  generate: complete
+  validate: complete
+  review: approved
+  measures_added: 14
+  views_updated: 5
+  explores_added: 1
+  platform: lookml
+  generated_date: 2026-06-06
+  reviewer: Mark Rittman
+  review_date: 2026-06-06
+  notes: lookml_views_notes.md
 ```
 
 ### Knowledge Skill

@@ -509,4 +509,30 @@ view: invoices_fact {
     sql: ${TABLE}.invoice_pk ;;
     filters: [is_invoice_in_clients_last_12m: "Yes"]
   }
+
+  # ── Canonical semantic layer measures — Wire agentic_data_stack 2026-06-06 ────────────
+
+  measure: outstanding_invoices_gbp {
+    group_label: "Canonical Metrics"
+    label: "Outstanding Invoices (GBP)"
+    type: sum
+    sql: CASE WHEN ${TABLE}.invoice_status NOT IN ('PAID','VOIDED') THEN ${TABLE}.invoice_amount_gbp ELSE 0 END ;;
+    value_format_name: gbp_0
+    description: "Total value of unpaid invoices (UNPAID, OVERDUE, DRAFT). Excludes PAID and VOIDED."
+  }
+
+  measure: days_sales_outstanding {
+    group_label: "Canonical Metrics"
+    label: "Days Sales Outstanding"
+    type: number
+    sql: SAFE_DIVIDE(
+      SUM(CASE WHEN ${TABLE}.invoice_status = 'PAID' AND ${TABLE}.invoice_total_days_to_pay IS NOT NULL
+               THEN ${TABLE}.invoice_total_days_to_pay ELSE 0 END),
+      NULLIF(COUNT(CASE WHEN ${TABLE}.invoice_status = 'PAID' AND ${TABLE}.invoice_total_days_to_pay IS NOT NULL
+                        THEN ${TABLE}.invoice_pk END), 0)
+    ) ;;
+    value_format_name: decimal_1
+    description: "Average days from invoice date to payment. Paid invoices only. Source: invoices_fact WHERE invoice_status = 'PAID'."
+  }
+
 }

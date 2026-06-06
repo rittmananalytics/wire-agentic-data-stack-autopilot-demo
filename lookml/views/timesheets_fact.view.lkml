@@ -1,3 +1,7 @@
+# Canonical delivery timesheet fact — Wire agentic_data_stack 2026-06-06
+# Grain: one row per consultant per day per project.
+# Canonical source for: billable_hours, billable_utilisation_pct, avg_billing_rate_gbp.
+
 view: timesheets_fact {
   sql_table_name: `{{ _user_attributes['dataset'] }}.timesheets_fact`
     ;;
@@ -227,5 +231,38 @@ view: timesheets_fact {
     sql: ${TABLE}.contact_fk ;;
   }
 
+  # timesheet_status added 2026-06-06 — accepted_values: submitted, approved, rejected
+  dimension: timesheet_status {
+    group_label: "    Timesheet Details"
+    type: string
+    sql: ${TABLE}.timesheet_status ;;
+    label: "Timesheet Status"
+    description: "Approval status: submitted, approved, rejected."
+  }
+
+  # ── Canonical semantic layer measures — Wire agentic_data_stack 2026-06-06 ────────────
+
+  measure: billable_utilisation_pct {
+    group_label: "Canonical Metrics"
+    label: "Billable Utilisation %"
+    type: number
+    sql: SAFE_DIVIDE(${total_timesheet_billable_hours_billed}, NULLIF(${total_timesheet_hours_billed}, 0)) ;;
+    value_format_name: percent_1
+    description: "Billable hours as a % of total hours logged. Uses logged-hours denominator — reads high when consultants log fewer than contracted hours."
+  }
+
+  measure: avg_billing_rate_gbp {
+    group_label: "Canonical Metrics"
+    label: "Avg Billing Rate (GBP/hr)"
+    type: number
+    sql: SAFE_DIVIDE(
+      SUM(CASE WHEN ${TABLE}.timesheet_is_billable = true AND ${TABLE}.timesheet_billable_hourly_rate_amount > 0
+               THEN ${TABLE}.timesheet_hours_billed * ${TABLE}.timesheet_billable_hourly_rate_amount ELSE 0 END),
+      NULLIF(SUM(CASE WHEN ${TABLE}.timesheet_is_billable = true AND ${TABLE}.timesheet_billable_hourly_rate_amount > 0
+                      THEN ${TABLE}.timesheet_hours_billed ELSE 0 END), 0)
+    ) ;;
+    value_format_name: gbp
+    description: "Weighted average hourly billing rate across billable entries with a valid rate. Excludes zero-rate entries."
+  }
 
 }

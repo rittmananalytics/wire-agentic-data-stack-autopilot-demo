@@ -1,11 +1,11 @@
-# The name of this view in Looker is "General Ledger Fact"
+# Canonical general ledger fact — Wire agentic_data_stack 2026-06-06
+# DO NOT use journals_fact — it is a staging artifact without currency normalisation.
+# Canonical source for: net_revenue_gbp, gross_profit_gbp, monthly_expenses_gbp.
+# All net_amount values are in GBP (already converted). Use net_amount not gross_amount.
+
 view: general_ledger_fact {
-  # The sql_table_name parameter indicates the underlying database table
-  # to be used for all fields in this view.
   sql_table_name: `ra-development.analytics.general_ledger_fact`
     ;;
-  # No primary key is defined for this view. In order to join this view in an Explore,
-  # define primary_key: yes on a dimension that has no repeated values.
 
   # Here's what a typical dimension looks like in LookML.
   # A dimension is a groupable field that can be used to filter query results.
@@ -40,10 +40,11 @@ view: general_ledger_fact {
   }
 
   dimension: account_report_category {
-    hidden: yes
-
+    hidden: no
     type: string
     sql: ${TABLE}.account_report_category ;;
+    label: "Account Report Category"
+    description: "Canonical P&L/balance sheet category: REVENUE, COST_OF_SALES, OVERHEADS, ASSETS, LIABILITIES, EQUITY. Use this — do not derive categories from account_code ranges."
   }
 
   dimension: account_report_group {
@@ -168,6 +169,23 @@ view: general_ledger_fact {
     sql: ${TABLE}.manual_journal_id ;;
   }
 
+  # column added 2026-06-06 — Wire agentic_data_stack canonical_models phase
+  dimension: amount_gbp {
+    type: number
+    sql: ${TABLE}.amount_gbp ;;
+    label: "Amount (GBP)"
+    description: "Transaction amount in GBP after currency conversion. Use this for all cross-currency reporting — do not use gross_amount."
+    value_format_name: decimal_2
+  }
+
+  # journal_type added 2026-06-06 — required for cash vs accrual filter in canonical metrics
+  dimension: journal_type {
+    type: string
+    sql: ${TABLE}.journal_type ;;
+    label: "Journal Type"
+    description: "Entry type. For cash-basis: filter IN ('CASH_RECEIPT','CASH_PAYMENT'). Accrual (default): include all types."
+  }
+
   dimension: journal_net_amount {
     type: number
     sql: ${TABLE}.net_amount ;;
@@ -222,14 +240,33 @@ view: general_ledger_fact {
 
 
 
-  # A measure is a field that uses a SQL aggregate function. Here are count, sum, and average
-  # measures for numeric dimensions, but you can also add measures of many different types.
-  # Click on the type parameter to see all the options in the Quick Help panel on the right.
+  # ── Canonical semantic layer measures — Wire agentic_data_stack 2026-06-06 ────────────
 
+  measure: net_revenue_gbp {
+    group_label: "Canonical Metrics"
+    label: "Net Revenue (GBP)"
+    type: sum
+    sql: CASE WHEN ${TABLE}.account_report_category = 'REVENUE' THEN ${TABLE}.net_amount ELSE 0 END ;;
+    value_format_name: gbp_0
+    description: "Net revenue from general ledger. Accrual basis. Source: general_ledger_fact WHERE account_report_category = 'REVENUE'."
+  }
 
+  measure: cost_of_sales_gbp {
+    group_label: "Canonical Metrics"
+    label: "Cost of Sales (GBP)"
+    type: sum
+    sql: CASE WHEN ${TABLE}.account_report_category = 'COST_OF_SALES' THEN ${TABLE}.net_amount ELSE 0 END ;;
+    value_format_name: gbp_0
+    description: "Direct cost of delivery from general ledger WHERE account_report_category = 'COST_OF_SALES'."
+  }
 
-  # These sum and average measures are hidden by default.
-  # If you want them to show up in your explore, remove hidden: yes.
-
+  measure: monthly_expenses_gbp {
+    group_label: "Canonical Metrics"
+    label: "Monthly Expenses (GBP)"
+    type: sum
+    sql: CASE WHEN ${TABLE}.account_report_category IN ('COST_OF_SALES','OVERHEADS') THEN ${TABLE}.net_amount ELSE 0 END ;;
+    value_format_name: gbp_0
+    description: "Total operating expenses (COST_OF_SALES + OVERHEADS). Excludes capital expenditure."
+  }
 
 }

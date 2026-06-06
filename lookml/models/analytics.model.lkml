@@ -1033,6 +1033,26 @@ explore: coding_agent_prompts_fact {
   }
 }
 
+# ============================================================
+# Wire Framework Adoption — added Wire agentic_data_stack 2026-06-06
+# ============================================================
+
+explore: wire_command_events {
+  from: agentic_framework_command_events_fact
+  label: "Wire Command Events"
+  group_label: "  Developer Tooling"
+  description: "Event-grain Wire Framework command telemetry. One row per CLI command execution. Use for adoption metrics, command volume, and autopilot usage tracking."
+  view_label: "Command Events"
+
+  join: persons_dim {
+    view_label: "Consultant"
+    fields: [persons_dim.person_name, persons_dim.person_pk, persons_dim.is_staff, persons_dim.employment_status]
+    type: left_outer
+    relationship: many_to_one
+    sql_on: ${wire_command_events.consultant_fk} = ${persons_dim.person_pk} ;;
+  }
+}
+
 explore: persons_dim {
   hidden: yes
   label: "          Unified Persons"
